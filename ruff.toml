@@ -1,0 +1,10 @@
+# upstream hermes-agent 의 ASYNC 게이트(게이트웨이 이벤트 루프를 멈추는 블로킹 호출 금지)를 그대로 쓰고,
+# 거기에 기본 pyflakes/pycodestyle 오류를 더한다.
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = ["E4", "E7", "E9", "F", "ASYNC210", "ASYNC220", "ASYNC221", "ASYNC251"]
+
+[lint.per-file-ignores]
+"tests/**" = ["ASYNC210", "ASYNC220", "ASYNC221", "ASYNC251", "E702"]

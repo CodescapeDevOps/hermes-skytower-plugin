@@ -1,0 +1,38 @@
+name: skytower-platform
+label: Skytower
+kind: platform
+version: 1.0.0
+description: >
+  Skytower Relay platform adapter for Hermes Agent.
+  Connects to Skytower Relay Server via Socket.IO and relays messages
+  between Skytower web clients and the Hermes agent. Supports file transfer,
+  per-user home channels, skill bindings, and real-time streaming.
+author: changman
+# Hermes 코어 의존성에 없는 패키지. PM 은 plugins.enabled 에 있는 플러그인의 이 목록을
+# 환경 합집합에 넣으므로, 선언이 없으면 `hermes update` 가 환경을 다시 만들 때 빠지고
+# check_fn 이 False 가 되어 플랫폼이 등록되지 않는다 ('skytower' is not a valid Platform).
+# psutil 은 코어 의존성이라 적지 않는다.
+python_dependencies:
+  - "python-socketio[asyncio_client]>=5.11,<6"
+requires_env:
+  - name: SKYTOWER_TOKEN
+    description: "Skytower agent token (agentId:rawToken format)"
+    prompt: "Skytower agent token"
+    password: true
+  - name: SKYTOWER_URL
+    description: "Skytower Relay server URL (e.g. https://relay.example.com)"
+    prompt: "Skytower Relay URL"
+    password: false
+optional_env:
+  - name: SKYTOWER_ALLOWED_USERS
+    description: "Comma-separated Skytower user IDs allowed to use the agent"
+    prompt: "Allowed users (comma-separated)"
+    password: false
+  - name: SKYTOWER_ALLOW_ALL_USERS
+    description: "Allow any Skytower user to use the agent"
+    prompt: "Allow all users? (true/false)"
+    password: false
+  - name: SKYTOWER_PRINT_PAIR_CODE
+    description: "Print pairing code on connect (1=yes, 0=no)"
+    prompt: "Print pairing code on connect? (1/0)"
+    password: false

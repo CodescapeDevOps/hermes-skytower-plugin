@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.pytest-hermes-home/
+.venv/
+*.egg-info/
+.DS_Store

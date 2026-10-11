@@ -1,0 +1,75 @@
+name: CI
+
+# 플러그인 테스트를 upstream NousResearch/hermes-agent 의 main 에 대고 돌린다.
+# push/PR 외에 매일 한 번 스케줄로 돌려서 upstream API 변경(예: connect(is_reconnect=...))을
+# 서버 로그가 아니라 CI 에서 먼저 본다.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"  # 매일 03:00 UTC (12:00 KST)
+
+jobs:
+  test:
+    name: pytest against upstream main
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+        with:
+          path: plugin
+
+      - name: Checkout upstream hermes-agent (main)
+        uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: main
+          path: hermes-agent
+          fetch-depth: 1
+
+      - name: Record upstream revision
+        run: git -C hermes-agent log -1 --format='upstream: %h %ci %s'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install hermes-agent dev environment
+        working-directory: hermes-agent
+        # --frozen: uv.lock 을 갱신하지 않고 그대로 설치 (upstream lock 이 pyproject 보다 뒤처져 있어도 진행)
+        run: |
+          uv sync --frozen --python 3.11 --extra dev
+          uv pip install "python-socketio[asyncio_client]>=5.11,<6"
+
+      - name: Lint (ruff)
+        working-directory: plugin
+        run: ../hermes-agent/.venv/bin/python -m ruff check skytower tests
+
+      - name: Validate manifest and run upstream plugin scanner
+        working-directory: plugin
+        env:
+          HERMES_AGENT_SRC: ${{ github.workspace }}/hermes-agent
+        run: |
+          ../hermes-agent/.venv/bin/python - <<'PY'
+          import os, sys
+          from pathlib import Path
+          sys.path.insert(0, os.environ["HERMES_AGENT_SRC"])
+          from hermes_cli.plugins_manifest import parse_manifest_file
+          from tools.plugin_guard import scan_plugin, format_scan_report, should_allow_plugin_install
+          d = Path("skytower").resolve()
+          m = parse_manifest_file(d / "plugin.yaml", d, "user", "")
+          assert m and m.name == "skytower-platform", m
+          print("manifest ok:", m.name, m.version, "deps:", m.python_dependencies)
+          r = scan_plugin(d, source="ci")
+          print(format_scan_report(r))
+          ok, why = should_allow_plugin_install(r, force=False)
+          assert ok, why
+          PY
+
+      - name: Run tests
+        working-directory: plugin
+        env:
+          HERMES_AGENT_SRC: ${{ github.workspace }}/hermes-agent
+        run: ../hermes-agent/.venv/bin/python -m pytest -q -p no:cacheprovider
