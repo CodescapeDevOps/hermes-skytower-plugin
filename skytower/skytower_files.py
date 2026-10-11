@@ -41,7 +41,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from agent.file_safety import get_read_block_error, is_write_denied
+from agent.file_safety import build_write_denied_prefixes, get_read_block_error, is_write_denied
 
 logger = logging.getLogger(__name__)
 
@@ -54,18 +54,13 @@ _MAX_WRITE_CHARS  = 10 * 1024 * 1024    # 쓰기 파일 최대 크기 (10 MB cha
 _MAX_UPLOAD_BYTES = 100 * 1024 * 1024   # 업로드 한 파일 최대 크기 (100 MB)
 _CHUNK_SIZE       = 256 * 1024          # 다운로드 청크 크기 (256 KB)
 
-# 읽기/목록 조회가 차단되는 민감 경로 접두어
-_BLOCKED_READ_PREFIXES: tuple[str, ...] = (
-    str(Path.home() / ".ssh"),
-    str(Path.home() / ".aws"),
-    str(Path.home() / ".gnupg"),
-    str(Path.home() / ".kube"),
-    str(Path.home() / ".docker"),
-    str(Path.home() / ".azure"),
-    str(Path.home() / ".config" / "gh"),
-    "/etc/sudoers.d",
-    "/etc/systemd",
-)
+
+def _blocked_read_prefixes() -> list[str]:
+    """읽기/목록 조회가 차단되는 민감 디렉토리 — upstream ``agent.file_safety`` 의 쓰기 금지
+    디렉토리 목록(~/.ssh, ~/.aws, ~/.gnupg, ~/.kube, ~/.docker, ~/.azure, ~/.config/gh, 시스템 설정
+    디렉토리 등)을 그대로 쓴다. 목록을 여기에 복제하지 않아야 upstream 과 어긋나지 않는다.
+    반환값은 realpath 에 ``os.sep`` 이 붙은 접두어들이다."""
+    return build_write_denied_prefixes(str(Path.home()))
 
 
 # ---------------------------------------------------------------------------
@@ -160,10 +155,9 @@ def _is_read_blocked(resolved: Path) -> Optional[str]:
     if err:
         return err
 
-    s = str(resolved)
-    for prefix in _BLOCKED_READ_PREFIXES:
-        real_prefix = str(Path(prefix).resolve())
-        if s == real_prefix or s.startswith(real_prefix + os.sep):
+    s = os.path.realpath(str(resolved)) + os.sep
+    for prefix in _blocked_read_prefixes():
+        if s.startswith(prefix):
             return f"Access denied: {resolved} is a sensitive path"
 
     return None
