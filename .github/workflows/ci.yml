@@ -40,7 +40,7 @@ jobs:
         working-directory: hermes-agent
         # --frozen: uv.lock 을 갱신하지 않고 그대로 설치 (upstream lock 이 pyproject 보다 뒤처져 있어도 진행)
         run: |
-          uv sync --frozen --python 3.11 --extra dev
+          uv sync --frozen --python 3.11 --group dev
           uv pip install "python-socketio[asyncio_client]>=5.11,<6"
 
       - name: Lint (ruff)

@@ -176,7 +176,7 @@ docs/                   설계 배경 문서
 ```bash
 # upstream 체크아웃과 그 개발 환경 준비 (한 번만)
 git clone https://github.com/NousResearch/hermes-agent.git ../hermes-agent
-(cd ../hermes-agent && uv sync --frozen --python 3.11 --extra dev && uv pip install "python-socketio[asyncio_client]")
+(cd ../hermes-agent && uv sync --frozen --python 3.11 --group dev && uv pip install "python-socketio[asyncio_client]")
 
 # 테스트 실행
 HERMES_AGENT_SRC=../hermes-agent ../hermes-agent/.venv/bin/python -m pytest -q
