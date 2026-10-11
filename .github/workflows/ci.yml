@@ -31,7 +31,7 @@ jobs:
           fetch-depth: 1
 
       - name: Record upstream revision
-        run: git -C hermes-agent log -1 --format='upstream: %h %ci %s'
+        run: "git -C hermes-agent log -1 --format='upstream %h %ci %s'"
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
