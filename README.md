@@ -27,42 +27,73 @@ iex (irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/script
 
 ### 스크립트로 설치 (권장)
 
+Skytower 서버 URL만 주면 됩니다. 토큰이 없으면 서버에 새 에이전트를 등록할지 묻고, 등록하면 토큰을 저장한 뒤 웹 앱에 입력할 **페어링 코드**를 보여 줍니다.
+
 **Linux / macOS**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CodescapeDevOps/hermes-skytower-plugin/main/scripts/install-skytower.sh | bash
-```
-
-토큰과 URL을 미리 지정하면 입력 없이 끝납니다.
-
-```bash
 curl -fsSL https://raw.githubusercontent.com/CodescapeDevOps/hermes-skytower-plugin/main/scripts/install-skytower.sh \
-  | bash -s -- --token "agentId:rawToken" --url "https://relay.example.com"
+  | bash -s -- --url "https://relay.example.com"
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-$env:SKYTOWER_TOKEN = "agentId:rawToken"
-$env:SKYTOWER_URL   = "https://relay.example.com"
+$env:SKYTOWER_URL = "https://relay.example.com"
 iex (irm https://raw.githubusercontent.com/CodescapeDevOps/hermes-skytower-plugin/main/scripts/install-skytower.ps1)
 ```
 
 **Windows (CMD)**
 
 ```bat
-set SKYTOWER_TOKEN=agentId:rawToken
 set SKYTOWER_URL=https://relay.example.com
 curl -fsSL https://raw.githubusercontent.com/CodescapeDevOps/hermes-skytower-plugin/main/scripts/install-skytower.cmd -o install-skytower.cmd && install-skytower.cmd && del install-skytower.cmd
 ```
 
-스크립트가 하는 일은 다음 다섯 가지입니다.
+설치가 끝나면 이렇게 나옵니다. 코드를 웹 앱 좌측 상단 에이전트 추가 버튼에 입력하면 에이전트가 내 계정에 연결됩니다.
+
+```
+새 에이전트 토큰 (다시 볼 수 없습니다 — 안전한 곳에 보관하세요):
+  AbC123xyz:Qw3...
+Skytower 웹 앱과 연결:
+  페어링 코드: K7Q2MX   (10분 유효, 1회)
+```
+
+**토큰 처리 규칙**
+
+| 상황 | 동작 |
+|---|---|
+| `--token`(`SKYTOWER_TOKEN`)을 줌 | 그 토큰을 씀 |
+| `~/.hermes/.env`에 이미 `SKYTOWER_TOKEN`이 있음 | 그대로 재사용 — 다시 실행해도 새 에이전트를 만들지 않음 |
+| 둘 다 없음, 터미널에서 실행 | 자동 등록할지(Y/n)와 에이전트 이름을 물음. `n`이면 토큰을 직접 입력 |
+| 둘 다 없음, 터미널 없음(CI 등) | `--register`가 있어야 등록. 없으면 토큰 없이 끝남 |
+
+| bash 옵션 | PowerShell / CMD 환경 변수 | 설명 |
+|---|---|---|
+| `--url URL` | `SKYTOWER_URL` | Skytower 서버 URL |
+| `--token TOKEN` | `SKYTOWER_TOKEN` | 이미 있는 토큰 (`agentId:rawToken`) |
+| `--register` / `--no-register` | `SKYTOWER_REGISTER=1` / `0` | 토큰이 없을 때 묻지 않고 등록 / 등록하지 않음 |
+| `--agent-name NAME` | `SKYTOWER_AGENT_NAME` | 새 에이전트 이름. 기본값 `Hermes Agent (<호스트 이름>)` |
+
+```bash
+# 묻지 않고 등록 (CI, 프로비저닝 스크립트)
+curl -fsSL .../install-skytower.sh | bash -s -- --url "https://relay.example.com" --register --agent-name "build-server"
+
+# 이미 토큰이 있을 때
+curl -fsSL .../install-skytower.sh | bash -s -- --token "agentId:rawToken" --url "https://relay.example.com"
+```
+
+토큰은 서버에 해시로만 저장되어 다시 볼 수 없습니다. 잃어버리면 새로 등록하고 다시 페어링해야 합니다.
+
+스크립트가 하는 일은 다음과 같습니다.
 
 1. `hermes plugins install CodescapeDevOps/hermes-skytower-plugin/skytower` 실행 (이미 있으면 `hermes plugins update`)
 2. `python-socketio` 설치 (PM 관리 설치에서는 Hermes가 활성화 시 직접 설치)
 3. `hermes plugins enable skytower-platform`
-4. `~/.hermes/.env`에 `SKYTOWER_TOKEN`, `SKYTOWER_URL` 기록
-5. Hermes가 실제로 쓰는 Python에서 플러그인 import 확인
+4. 토큰 확보 — 기존 값 재사용, 없으면 자동 등록(`POST /api/agents/register`) 또는 직접 입력
+5. `~/.hermes/.env`에 `SKYTOWER_TOKEN`, `SKYTOWER_URL` 기록
+6. 새로 등록했으면 페어링 코드 발급(`POST /api/agents/pairing-code`)
+7. Hermes가 실제로 쓰는 Python에서 플러그인 import 확인
 
 ### 수동 설치
 
@@ -70,6 +101,13 @@ curl -fsSL https://raw.githubusercontent.com/CodescapeDevOps/hermes-skytower-plu
 hermes plugins install CodescapeDevOps/hermes-skytower-plugin/skytower
 pip install "python-socketio[asyncio_client]>=5.11,<6"   # Hermes venv 안에서
 hermes plugins enable skytower-platform
+```
+
+토큰이 없으면 서버에 에이전트를 등록해 받습니다. 응답의 `token`이 토큰입니다.
+
+```bash
+curl -fsSL -X POST https://relay.example.com/api/agents/register \
+  -H "Content-Type: application/json" -d '{"name":"My Hermes Agent"}'
 ```
 
 그 다음 `~/.hermes/.env`에 토큰과 URL을 적습니다.

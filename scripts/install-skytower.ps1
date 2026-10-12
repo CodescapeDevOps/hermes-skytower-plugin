@@ -11,7 +11,15 @@
 # 2단계 — Skytower 채널 플러그인 설치:
 #   iex (irm https://raw.githubusercontent.com/CodescapeDevOps/hermes-skytower-plugin/main/scripts/install-skytower.ps1)
 #
-# 토큰/URL을 미리 지정:
+# 토큰이 없으면 Skytower 서버에 새 에이전트를 등록할지 묻고, 등록하면 토큰을 저장하고
+# 웹 앱에 입력할 페어링 코드를 보여 줍니다. 서버 URL 만 주면 됩니다:
+#   $env:SKYTOWER_URL = "https://relay.example.com"
+#   iex (irm https://raw.githubusercontent.com/CodescapeDevOps/hermes-skytower-plugin/main/scripts/install-skytower.ps1)
+#
+# 묻지 않고 등록:  $env:SKYTOWER_REGISTER = "1"; $env:SKYTOWER_AGENT_NAME = "My Agent"
+# 등록하지 않음:   $env:SKYTOWER_REGISTER = "0"
+#
+# 이미 토큰이 있으면:
 #   $env:SKYTOWER_TOKEN = "agentId:rawToken"
 #   $env:SKYTOWER_URL   = "https://relay.example.com"
 #   iex (irm https://raw.githubusercontent.com/CodescapeDevOps/hermes-skytower-plugin/main/scripts/install-skytower.ps1)
@@ -26,6 +34,8 @@ param(
     [string]$Token      = $env:SKYTOWER_TOKEN,
     [string]$Url        = $env:SKYTOWER_URL,
     [string]$Ref        = $env:SKYTOWER_PLUGIN_REF,
+    [string]$AgentName  = $env:SKYTOWER_AGENT_NAME,
+    [string]$Register   = $env:SKYTOWER_REGISTER,   # 1 = 묻지 않고 등록, 0 = 등록 안 함, 비우면 묻는다
     [string]$HermesHome = ""
 )
 
@@ -38,6 +48,13 @@ $PluginName       = "skytower-platform"
 $PluginRepo       = "CodescapeDevOps/hermes-skytower-plugin"
 $PluginGitUrl     = "https://github.com/$PluginRepo.git"
 $PluginIdentifier = "$PluginRepo/skytower"
+$DefaultAgentName = "Hermes Agent ($env:COMPUTERNAME)"
+
+# Configure-Env 가 채우고 Write-SuccessBanner 가 읽는다
+$script:AgentRegistered = $false
+$script:AgentToken      = ""
+$script:PairCode        = ""
+$script:PairUrl         = ""
 
 # ============================================================================
 # Helpers
@@ -250,39 +267,131 @@ function Enable-Plugin {
     else { Write-Warn "플러그인 활성화 실패 - 직접 실행하세요: hermes plugins enable $PluginName" }
 }
 
+# ============================================================================
+# 토큰 - 기존 값 재사용 / 자동 등록 / 직접 입력
+# ============================================================================
+
+# irm | iex 는 콘솔에서 돌아 Read-Host 가 된다. 입력이 리디렉션된 환경(CI)에서는 묻지 않는다.
+function Test-Interactive {
+    try { return [Environment]::UserInteractive -and -not [Console]::IsInputRedirected } catch { return $false }
+}
+
+function Get-EnvValue {
+    param([string]$Content, [string]$Key)
+    if ($Content -match "(?m)^$([regex]::Escape($Key))=(.*)$") { return $Matches[1].Trim() }
+    return ""
+}
+
+function Set-EnvValue {
+    param([string]$Content, [string]$Key, [string]$Value)
+    $pattern = "(?m)^$([regex]::Escape($Key))=.*$"
+    $line = "$Key=$Value"
+    # -replace 는 값 안의 $ 를 치환 패턴으로 읽는다 - 평가자로 그대로 넣는다
+    if ($Content -match $pattern) { return [regex]::Replace($Content, $pattern, { param($m) $line }.GetNewClosure()) }
+    if ($Content -and -not $Content.EndsWith("`n")) { $Content += "`n" }
+    return $Content + "$line`n"
+}
+
+# POST /api/agents/register - 인증 없이 이름만으로 에이전트를 만들고 agentId:rawToken 을 돌려준다.
+function Register-Agent {
+    param([string]$RelayUrl, [string]$Name)
+    Write-Info "Skytower 서버에 에이전트 등록 중: $Name"
+    try {
+        $body = [System.Text.Encoding]::UTF8.GetBytes((@{ name = $Name } | ConvertTo-Json -Compress))
+        $resp = Invoke-RestMethod -Method Post -Uri "$RelayUrl/api/agents/register" -ContentType 'application/json; charset=utf-8' -Body $body
+    } catch {
+        Write-Err "에이전트 등록 실패 ($RelayUrl): $($_.Exception.Message)"
+        return $null
+    }
+    if ("$($resp.token)" -notmatch '^[^:]+:.+$') {
+        Write-Err "등록 응답을 해석하지 못했습니다: $($resp | ConvertTo-Json -Compress)"
+        return $null
+    }
+    Write-Success "에이전트 등록 완료: $($resp.token.Split(':')[0])"
+    return [string]$resp.token
+}
+
+# 새 에이전트는 아직 누구의 계정에도 연결돼 있지 않다 - 웹 앱에 입력할 페어링 코드를 받아 둔다.
+# 게이트웨이가 꺼져 있어도 발급된다. 서버는 본문이 없으면 500 이라 {} 를 보낸다.
+function Get-PairCode {
+    param([string]$RelayUrl, [string]$AgentToken)
+    try {
+        $resp = Invoke-RestMethod -Method Post -Uri "$RelayUrl/api/agents/pairing-code" -Headers @{ Authorization = "Bearer $AgentToken" } -ContentType 'application/json' -Body '{}'
+        $script:PairCode = [string]$resp.code
+        $script:PairUrl  = [string]$resp.pairUrl
+        return [bool]$script:PairCode
+    } catch { return $false }
+}
+
+# 토큰이 없을 때: 자동 등록(묻거나 SKYTOWER_REGISTER=1) -> 실패하거나 거절하면 직접 입력
+function Get-AgentToken {
+    param([string]$RelayUrl, [bool]$Interactive)
+    $want = switch -Regex ("$Register") { '^(1|true|yes)$' { 'yes' } '^(0|false|no)$' { 'no' } default { '' } }
+    if (-not $want) {
+        if ($Interactive) {
+            Write-Host ""
+            Write-Host "  Skytower 에이전트 토큰이 없습니다. 서버에 새 에이전트를 등록할 수 있습니다." -ForegroundColor Cyan
+            $ans = "$(Read-Host '자동 등록할까요? (Y/n)')".Trim()
+            $want = if ($ans -match '^[Nn]') { 'no' } else { 'yes' }
+        } else { $want = 'no' }
+    }
+
+    if ($want -eq 'yes') {
+        if (-not $RelayUrl) {
+            Write-Err "서버 URL 이 없어 에이전트를 등록할 수 없습니다 (SKYTOWER_URL)"
+        } else {
+            $name = $AgentName
+            if (-not $name -and $Interactive) { $name = "$(Read-Host "에이전트 이름 (기본값: $DefaultAgentName)")".Trim() }
+            if (-not $name) { $name = $DefaultAgentName }
+            $registered = Register-Agent -RelayUrl $RelayUrl -Name $name
+            if ($registered) { $script:AgentRegistered = $true; return $registered }
+        }
+    }
+
+    if ($Interactive) { return "$(Read-Host 'Skytower 에이전트 토큰 입력 (agentId:rawToken, 없으면 Enter)')".Trim() }
+    return ""
+}
+
 function Configure-Env {
     param([string]$HermesHomeDir)
 
     $envFile = "$HermesHomeDir\.env"
     if (-not (Test-Path $envFile)) { New-Item -ItemType File -Force -Path $envFile | Out-Null }
+    $content = [System.IO.File]::ReadAllText($envFile)
+    $interactive = Test-Interactive
 
-    if (-not $Token) { $Token = (Read-Host "`nSkytower 에이전트 토큰 입력 (agentId:rawToken, 없으면 Enter)").Trim() }
-    if (-not $Url)   { $Url   = (Read-Host "Skytower Relay URL 입력 (예: https://relay.example.com, 없으면 Enter)").Trim() }
+    # 이미 저장된 값을 먼저 쓴다 - 다시 실행해도 에이전트를 새로 등록하지 않는다.
+    $relayUrl = $Url
+    if (-not $relayUrl) { $relayUrl = Get-EnvValue $content "SKYTOWER_URL" }
+    if (-not $relayUrl -and $interactive) { $relayUrl = "$(Read-Host "`nSkytower 서버 URL 입력 (예: https://relay.example.com, 없으면 Enter)")".Trim() }
+    $relayUrl = "$relayUrl".TrimEnd('/')
 
-    $content = Get-Content $envFile -Raw -ErrorAction SilentlyContinue
-    if (-not $content) { $content = "" }
-
-    function Upsert-EnvVar {
-        param([string]$Key, [string]$Value)
-        if ($content -match "(?m)^${Key}=.*") {
-            $script:content = $content -replace "(?m)^${Key}=.*", "${Key}=${Value}"
-        } else {
-            $script:content += "`n${Key}=${Value}"
-        }
+    $agentToken = $Token
+    if (-not $agentToken) {
+        $agentToken = Get-EnvValue $content "SKYTOWER_TOKEN"
+        if ($agentToken) { Write-Info "기존 토큰 사용 (agentId=$($agentToken.Split(':')[0])) - $envFile" }
+        else { $agentToken = Get-AgentToken -RelayUrl $relayUrl -Interactive $interactive }
     }
+    $script:AgentToken = $agentToken
 
     $changed = $false
-    if ($Token) { Upsert-EnvVar "SKYTOWER_TOKEN" $Token; $changed = $true }
-    if ($Url)   { Upsert-EnvVar "SKYTOWER_URL"   $Url;   $changed = $true }
-    if ($content -notmatch "(?m)^SKYTOWER_ALLOW_ALL_USERS=") { $content += "`nSKYTOWER_ALLOW_ALL_USERS=true" }
-    if ($content -notmatch "(?m)^SKYTOWER_PRINT_PAIR_CODE=") { $content += "`nSKYTOWER_PRINT_PAIR_CODE=0" }
-    Set-Content $envFile $content.TrimStart()
+    if ($agentToken) { $content = Set-EnvValue $content "SKYTOWER_TOKEN" $agentToken; $changed = $true }
+    if ($relayUrl)   { $content = Set-EnvValue $content "SKYTOWER_URL"   $relayUrl;   $changed = $true }
+    if ($content -notmatch "(?m)^SKYTOWER_ALLOW_ALL_USERS=") { $content = Set-EnvValue $content "SKYTOWER_ALLOW_ALL_USERS" "true" }
+    if ($content -notmatch "(?m)^SKYTOWER_PRINT_PAIR_CODE=") { $content = Set-EnvValue $content "SKYTOWER_PRINT_PAIR_CODE" "0" }
+    # Hermes 는 .env 를 UTF-8 로 읽는다. Set-Content(5.1) 의 기본 ANSI 로 쓰면 비ASCII 주석이 깨진다.
+    [System.IO.File]::WriteAllText($envFile, $content.TrimStart(), (New-Object System.Text.UTF8Encoding $false))
 
     if ($changed) { Write-Success "Skytower 설정 저장됨: $envFile" }
     else {
         Write-Warn "토큰/URL을 나중에 $envFile 에 직접 추가하세요:"
         Write-Host "  SKYTOWER_TOKEN=agentId:rawToken" -ForegroundColor Yellow
         Write-Host "  SKYTOWER_URL=https://relay.example.com" -ForegroundColor Yellow
+    }
+
+    if ($script:AgentRegistered -and -not (Get-PairCode -RelayUrl $relayUrl -AgentToken $agentToken)) {
+        Write-Warn "페어링 코드를 받지 못했습니다 - 게이트웨이를 켠 뒤 대화에서 /paircode 를 쓰거나"
+        Write-Warn "  $envFile 에 SKYTOWER_PRINT_PAIR_CODE=1 을 넣고 게이트웨이를 재시작하세요"
     }
 }
 
@@ -357,6 +466,19 @@ function Write-SuccessBanner {
     Write-Host "  /chatid    현재 대화 JID 확인        /sethome   현재 대화를 홈 채널로"
     Write-Host "  /skills    사용 가능한 스킬 목록      /paircode  친구 추가 코드 발급"
     Write-Host ""
+    if ($script:AgentRegistered) {
+        Write-Host "새 에이전트 토큰 (다시 볼 수 없습니다 - 안전한 곳에 보관하세요):" -ForegroundColor Yellow
+        Write-Host "  $($script:AgentToken)" -ForegroundColor Green
+        Write-Host "  저장 위치: $HermesHomeDir\.env"
+        Write-Host ""
+        if ($script:PairCode) {
+            Write-Host "Skytower 웹 앱과 연결:" -ForegroundColor Cyan
+            Write-Host "  페어링 코드: " -NoNewline; Write-Host $script:PairCode -ForegroundColor Green -NoNewline; Write-Host "   (10분 유효, 1회)"
+            if ($script:PairUrl) { Write-Host "  바로 열기:   $($script:PairUrl)" }
+            Write-Host "  웹 앱 좌측 상단 에이전트 추가 버튼에 코드를 입력하세요."
+            Write-Host ""
+        }
+    }
     $envFile = "$HermesHomeDir\.env"
     $tokenVal = (Get-Content $envFile -ErrorAction SilentlyContinue | Where-Object { $_ -match "^SKYTOWER_TOKEN=" }) -replace "^SKYTOWER_TOKEN=", ""
     if (-not $tokenVal) {
