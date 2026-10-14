@@ -804,3 +804,66 @@ class TestThreadContext:
         })
         event = adapter.handle_message.call_args[0][0]
         assert event.text == "본문 메시지"
+
+
+# ---------------------------------------------------------------------------
+# Conversation titles (skytower #10)
+# ---------------------------------------------------------------------------
+
+class TestConversationTitle:
+    """relay 가 title_wanted 를 붙인 첫 메시지에만 제목을 만들어 conversation_title 로 보낸다."""
+
+    def _payload(self, **over):
+        base = {
+            "direction": "outbound", "type": "text", "content": "@Hermes 로그인 버튼이 모바일에서 안 눌려요",
+            "user_id": 7, "conversation_id": 3, "id": 70, "title_wanted": True,
+        }
+        base.update(over)
+        return base
+
+    def _adapter(self):
+        adapter = _make_adapter()
+        adapter.handle_message = AsyncMock()
+        adapter._sio = AsyncMock()
+        adapter._sio.connected = True
+        return adapter
+
+    async def _run(self, adapter, payload, generate):
+        with patch("agent.title_generator.generate_title", generate):
+            await adapter._handle_relay_message(payload)
+            for task in list(adapter._title_tasks):
+                await task
+
+    @pytest.mark.asyncio
+    async def test_emits_generated_title(self):
+        adapter = self._adapter()
+        generate = MagicMock(return_value="Fix mobile login button")
+        await self._run(adapter, self._payload(), generate)
+        generate.assert_called_once_with("로그인 버튼이 모바일에서 안 눌려요")
+        adapter._sio.emit.assert_any_call("conversation_title", {"conversation_id": 3, "title": "Fix mobile login button"})
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_skipped_without_title_wanted(self):
+        adapter = self._adapter()
+        generate = MagicMock(return_value="Should not happen")
+        await self._run(adapter, self._payload(title_wanted=None), generate)
+        generate.assert_not_called()
+        assert not any(c.args[0] == "conversation_title" for c in adapter._sio.emit.call_args_list)
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_model_declines_or_fails_quietly(self):
+        for generate in (MagicMock(return_value=None), MagicMock(side_effect=RuntimeError("provider down"))):
+            adapter = self._adapter()
+            await self._run(adapter, self._payload(), generate)
+            generate.assert_called_once()
+            assert not any(c.args[0] == "conversation_title" for c in adapter._sio.emit.call_args_list)
+            adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_mention_only_message_is_not_titled(self):
+        adapter = self._adapter()
+        generate = MagicMock(return_value="x")
+        await self._run(adapter, self._payload(content="@Hermes"), generate)
+        generate.assert_not_called()

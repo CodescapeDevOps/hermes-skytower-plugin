@@ -38,6 +38,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 from pathlib import Path as _Path
 from typing import Any, Dict, List, Optional
 
@@ -61,6 +62,9 @@ except Exception as _confinement_exc:  # pragma: no cover - 배포 환경 차이
     logging.getLogger(__name__).warning("skytower: confinement unavailable, running without folder limits: %s", _confinement_exc)
 
 logger = logging.getLogger(__name__)
+
+# 본문 앞쪽의 @멘션들. 제목을 만들 때 떼어 낸다 (relay 의 즉시 제목과 같은 규칙).
+_LEADING_MENTIONS = re.compile(r"^(?:@\S+\s*)+")
 
 
 def _extract_reply_to(data: dict) -> tuple[Optional[str], Optional[str]]:
@@ -287,6 +291,7 @@ class SkyTowerAdapter(BasePlatformAdapter):
         self._home_channels: Dict[str, str] = _load_home_channels()
         self._file_handler: Optional[FileAccessHandler] = None
         self._relay_capabilities: Dict[str, bool] = {}
+        self._title_tasks: set = set()
         # gateway 는 send_chunk 에 chat_id 를 주지 않는다. 세션 task 는 메시지를
         # 받은 컨텍스트를 복사해 만들어지므로, ContextVar 에 넣어 두면 병렬 세션이
         # 있어도 각 task 가 자기 대화방을 본다. (전역 필드 하나로 두면 방 A 가
@@ -518,6 +523,12 @@ class SkyTowerAdapter(BasePlatformAdapter):
         if shared and data.get("mentioned") is False:
             logger.debug("shared room message without mention dropped conv=%s", conv_str)
             return
+
+        # 이름 없이 만든 방의 첫 메시지면 relay 가 title_wanted 를 붙인다. 답을 늦추지 않도록
+        # 제목은 따로 만들어 conversation_title 로 보낸다 (skytower ADR 0002).
+        if data.get("title_wanted") and conv_str:
+            self._spawn_conversation_title(conv_str, data.get("content") or "")
+
         if shared:
             chat_id = _shared_chat_id(self._agent_id, conv_str)
         elif conv_str:
@@ -666,6 +677,43 @@ class SkyTowerAdapter(BasePlatformAdapter):
             logger.warning("Unknown file_content type: %r", fc_type)
 
         return content, media_urls, media_types, message_type
+
+    # ── 대화방 제목 ───────────────────────────────────────────────────────────
+
+    def _spawn_conversation_title(self, conv_id: str, text: str) -> None:
+        task = asyncio.create_task(self._send_conversation_title(conv_id, text))
+        # 끝나기 전에 가비지 컬렉션되지 않도록 붙잡아 둔다
+        self._title_tasks.add(task)
+        task.add_done_callback(self._title_tasks.discard)
+
+    async def _send_conversation_title(self, conv_id: str, text: str) -> None:
+        """hermes 제목 생성기(agent.title_generator)로 제목을 만들어 relay 에 보낸다.
+
+        upstream 의 제목 콜백은 Telegram·Discord 에만 연결되어 있어 같은 함수를 직접 부른다 —
+        같은 모델 설정(auxiliary.title_generation)과 안전장치를 그대로 쓴다. 실패하면 조용히
+        넘어간다: relay 가 첫 줄로 붙인 임시 제목이 남는다.
+        """
+        try:
+            from agent.title_generator import generate_title
+        except ImportError:
+            logger.debug("skytower: agent.title_generator unavailable — conversation title skipped")
+            return
+        # "@Hermes 로그인 버그 봐줘" 의 멘션은 제목감이 아니다
+        text = _LEADING_MENTIONS.sub("", text.strip())
+        if not text:
+            return
+        try:
+            title = await asyncio.to_thread(generate_title, text)
+        except Exception as exc:
+            logger.warning("skytower: title generation failed conv=%s: %s", conv_id, exc)
+            return
+        if not title or not self._sio or not self._sio.connected:
+            return
+        try:
+            await self._sio.emit("conversation_title", {"conversation_id": int(conv_id), "title": title})
+            logger.info("skytower: conversation title conv=%s %r", conv_id, title)
+        except Exception as exc:
+            logger.warning("skytower: conversation_title emit failed conv=%s: %s", conv_id, exc)
 
     # ── 메시지 전송 헬퍼 ──────────────────────────────────────────────────────
 
