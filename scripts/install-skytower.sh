@@ -185,6 +185,17 @@ resolve_ref() {
     PLUGIN_REF="$sha"
 }
 
+# 최신 Hermes 는 켜져 있는 플러그인을 다시 설치(update 포함)할 때 Python 의존성 설치 동의를 묻고,
+# 터미널이 아니면 거절로 친다 — "Reinstall declined: dependency install skipped (non-interactive)".
+# 이 스크립트는 hermes 의 stdin 을 </dev/null 로 막으므로 항상 거절된다. 이 설치기를 실행한 것이 곧
+# python-socketio 설치에 대한 동의이니, Hermes 가 지원하면 --yes-deps 로 미리 답한다.
+# (plugins update 에는 이 옵션이 없어 그때는 install --force 로 갱신한다.)
+supports_yes_deps() {
+    local help
+    help="$(HERMES_HOME="$HERMES_HOME" "$HERMES_CLI" plugins install --help 2>/dev/null </dev/null)" || return 1
+    case "$help" in *--yes-deps*) return 0 ;; *) return 1 ;; esac
+}
+
 install_plugin() {
     local target_dir="$HERMES_HOME/plugins/$PLUGIN_NAME"
     local script_dir; script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
@@ -202,8 +213,11 @@ install_plugin() {
     resolve_ref
     local ref_args=()
     [ -n "$PLUGIN_REF" ] && ref_args=(--ref "$PLUGIN_REF")
+    local deps_args=()
+    supports_yes_deps && deps_args=(--yes-deps)
 
-    if [ -d "$target_dir" ] && [ -z "$PLUGIN_REF" ]; then
+    # 구버전 Hermes(--yes-deps 없음)는 동의 절차도 없어 update 로 갱신된다.
+    if [ -d "$target_dir" ] && [ -z "$PLUGIN_REF" ] && [ ${#deps_args[@]} -eq 0 ]; then
         log_info "이미 설치됨 — 최신으로 갱신 중 (hermes plugins update $PLUGIN_NAME)..."
         if HERMES_HOME="$HERMES_HOME" "$HERMES_CLI" plugins update "$PLUGIN_NAME" </dev/null; then
             log_success "플러그인 갱신 완료"; return 0
@@ -213,12 +227,12 @@ install_plugin() {
 
     local force_args=()
     [ -d "$target_dir" ] && force_args=(--force)
-    log_info "플러그인 설치 중 (hermes plugins install $PLUGIN_IDENTIFIER ${ref_args[*]} ${force_args[*]})..."
-    if HERMES_HOME="$HERMES_HOME" "$HERMES_CLI" plugins install "$PLUGIN_IDENTIFIER" --no-enable "${ref_args[@]}" "${force_args[@]}" </dev/null; then
+    log_info "플러그인 설치 중 (hermes plugins install $PLUGIN_IDENTIFIER ${ref_args[*]} ${force_args[*]} ${deps_args[*]})..."
+    if HERMES_HOME="$HERMES_HOME" "$HERMES_CLI" plugins install "$PLUGIN_IDENTIFIER" --no-enable "${ref_args[@]}" "${force_args[@]}" "${deps_args[@]}" </dev/null; then
         log_success "플러그인 설치 완료: $target_dir"
     else
         log_error "플러그인 설치 실패. 직접 실행해 보세요:"
-        echo "  hermes plugins install $PLUGIN_IDENTIFIER ${ref_args[*]} ${force_args[*]}"
+        echo "  hermes plugins install $PLUGIN_IDENTIFIER ${ref_args[*]} ${force_args[*]} ${deps_args[*]}"
         exit 1
     fi
 }

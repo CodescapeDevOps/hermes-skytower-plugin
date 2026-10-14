@@ -210,8 +210,15 @@ function Install-Plugin {
 
     $env:HERMES_HOME = $HermesHomeDir
     $sha = Resolve-PluginRef -RefValue $Ref
+    # 최신 Hermes 는 켜져 있는 플러그인을 다시 설치(update 포함)할 때 Python 의존성 설치 동의를 묻고,
+    # 터미널이 아니면 거절한다 ("Reinstall declined: dependency install skipped (non-interactive)").
+    # 이 설치기를 실행한 것이 곧 동의이니 지원하면 --yes-deps 로 미리 답한다. plugins update 에는
+    # 이 옵션이 없어 그때는 install --force 로 갱신한다. 구버전 Hermes 는 동의 절차도 없어 update 를 쓴다.
+    # PS 5.1 은 Stop 에서 stderr 한 줄(경고 등)만 나와도 중단하므로 이 확인에서만 Continue 로 둔다.
+    $installHelp = & { $ErrorActionPreference = "Continue"; & $HermesCli plugins install --help 2>$null } | Out-String
+    $yesDeps = $installHelp -match '--yes-deps'
 
-    if ((Test-Path $targetDir) -and -not $sha) {
+    if ((Test-Path $targetDir) -and -not $sha -and -not $yesDeps) {
         Write-Info "이미 설치됨 - 최신으로 갱신 중 (hermes plugins update $PluginName)..."
         & $HermesCli plugins update $PluginName
         if ($LASTEXITCODE -eq 0) { Write-Success "플러그인 갱신 완료"; return }
@@ -221,6 +228,7 @@ function Install-Plugin {
     $cliArgs = @("plugins", "install", $PluginIdentifier, "--no-enable")
     if ($sha) { $cliArgs += @("--ref", $sha) }
     if (Test-Path $targetDir) { $cliArgs += "--force" }
+    if ($yesDeps) { $cliArgs += "--yes-deps" }
     Write-Info "플러그인 설치 중 (hermes $($cliArgs -join ' '))..."
     & $HermesCli @cliArgs
     if ($LASTEXITCODE -ne 0) {
