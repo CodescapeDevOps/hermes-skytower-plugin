@@ -87,7 +87,7 @@ curl -fsSL .../install-skytower.sh | bash -s -- --token "agentId:rawToken" --url
 
 스크립트가 하는 일은 다음과 같습니다.
 
-1. `hermes plugins install CodescapeDevOps/hermes-skytower-plugin/skytower` 실행 (이미 있으면 `hermes plugins update`)
+1. `hermes plugins install CodescapeDevOps/hermes-skytower-plugin/skytower` 실행 (이미 있으면 갱신 — Hermes 가 `--yes-deps` 를 지원하면 `install --force --yes-deps`, 아니면 `hermes plugins update`)
 2. `python-socketio` 설치 (PM 관리 설치에서는 Hermes가 활성화 시 직접 설치)
 3. `hermes plugins enable skytower-platform`
 4. 토큰 확보 — 기존 값 재사용, 없으면 자동 등록(`POST /api/agents/register`) 또는 직접 입력
@@ -167,6 +167,12 @@ hermes gateway restart
 ```
 
 Hermes 자체는 평소대로 `hermes update`로 갱신합니다. 플러그인이 Hermes 저장소 밖에 있어서 업데이트와 충돌하지 않습니다.
+
+최신 Hermes는 켜져 있는 플러그인을 갱신할 때 Python 의존성(`python-socketio`) 설치에 동의하는지 묻습니다. 터미널에서는 `y`로 답하면 됩니다. SSH 자동화처럼 답할 수 없는 곳에서는 `Reinstall declined: dependency install skipped (non-interactive)`로 거절되므로, 동의를 미리 주고 다시 설치합니다. 설치 스크립트를 다시 실행해도 같은 방법으로 갱신됩니다.
+
+```bash
+hermes plugins install CodescapeDevOps/hermes-skytower-plugin/skytower --force --yes-deps
+```
 
 ## 문제 해결
 
