@@ -6,7 +6,7 @@
 # 공식 Hermes 저장소 디렉토리는 건드리지 않습니다. 그래서 `hermes update` 와 충돌하지 않습니다.
 #
 # 1단계 — 공식 Hermes Agent 설치 (아직 설치 안 된 경우):
-#   iex (irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1)
+#   iex (irm https://hermes-agent.nousresearch.com/install.ps1)
 #
 # 2단계 — Skytower 채널 플러그인 설치:
 #   iex (irm https://raw.githubusercontent.com/CodescapeDevOps/hermes-skytower-plugin/main/scripts/install-skytower.ps1)
@@ -103,7 +103,7 @@ function Find-HermesInstall {
     Write-Err "Hermes Agent 설치를 찾을 수 없습니다."
     Write-Host ""
     Write-Host "  먼저 공식 Hermes Agent를 설치해주세요:" -ForegroundColor Yellow
-    Write-Host "  iex (irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1)" -ForegroundColor Cyan
+    Write-Host "  iex (irm https://hermes-agent.nousresearch.com/install.ps1)" -ForegroundColor Cyan
     Write-Host ""
     exit 1
 }

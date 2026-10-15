@@ -7,7 +7,7 @@
 # 공식 Hermes 저장소 디렉토리는 건드리지 않습니다. 그래서 `hermes update` 와 충돌하지 않습니다.
 #
 # 1단계 — 공식 Hermes Agent 설치 (아직 설치 안 된 경우):
-#   curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+#   curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 #
 # 2단계 — Skytower 채널 플러그인 설치:
 #   curl -fsSL https://raw.githubusercontent.com/CodescapeDevOps/hermes-skytower-plugin/main/scripts/install-skytower.sh | bash
@@ -120,7 +120,7 @@ find_hermes_install() {
     log_error "Hermes Agent 설치를 찾을 수 없습니다."
     echo ""
     echo "  먼저 공식 Hermes Agent를 설치해주세요:"
-    echo "  curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash"
+    echo "  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
     echo ""
     exit 1
 }

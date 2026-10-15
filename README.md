@@ -14,14 +14,16 @@ Skytower Relay 서버에 Socket.IO로 접속해 Skytower 웹 클라이언트와 
 Hermes Agent가 없다면 먼저 설치하세요.
 
 ```bash
-# Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+# Linux / macOS / WSL2
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 ```
 
 ```powershell
 # Windows
-iex (irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1)
+iex (irm https://hermes-agent.nousresearch.com/install.ps1)
 ```
+
+설치가 끝나면 새 터미널을 열거나 `source ~/.bashrc`(zsh 는 `~/.zshrc`)로 셸을 다시 읽은 뒤 다음 단계로 넘어갑니다. Windows 는 새 PowerShell 창을 엽니다. 공식 설치 주소는 [Hermes README](https://github.com/NousResearch/hermes-agent#quick-install) 를 따릅니다. CMD 래퍼(`install.cmd`)는 공식 주소에 없어 `install-skytower.cmd` 안내는 GitHub 의 `scripts/install.cmd` 를 그대로 씁니다.
 
 ## 설치
 
