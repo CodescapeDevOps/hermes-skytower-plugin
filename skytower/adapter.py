@@ -518,10 +518,13 @@ class SkyTowerAdapter(BasePlatformAdapter):
             )
 
         # 공유 프로젝트 방: relay 가 shared=true 와 project / participants 를 실어 보낸다.
-        # 멘션 게이팅은 relay 가 하지만, mentioned=false 가 오면 여기서도 버린다.
+        # 멘션 게이팅은 relay 가 한다 (mention_only 방에서만 멘션 없는 메시지를 거른다). 여기서는 그 결정을
+        # 한 번 더 확인할 뿐, mention_only 가 꺼진 방(조직 워크스페이스의 1:1 방, "멘션 없이 응답" 설정)의
+        # 멘션 없는 메시지는 그대로 받는다. 예전엔 mentioned=false 면 무조건 버려서, 그런 방의 메시지가
+        # relay 는 전달했다고 하는데 에이전트는 영영 답하지 않았다 (skytower #57 보고).
         shared = bool(data.get("shared")) and bool(conv_str)
-        if shared and data.get("mentioned") is False:
-            logger.debug("shared room message without mention dropped conv=%s", conv_str)
+        if shared and data.get("mentioned") is False and data.get("mention_only"):
+            logger.info("shared room message without mention dropped conv=%s (mention_only room)", conv_str)
             return
 
         # 이름 없이 만든 방의 첫 메시지면 relay 가 title_wanted 를 붙인다. 답을 늦추지 않도록

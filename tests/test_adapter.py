@@ -668,6 +668,26 @@ class TestSharedRooms:
         adapter.handle_message.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_unmentioned_message_is_delivered_when_mention_only_is_off(self):
+        # 조직 워크스페이스의 1:1 방(direct)과 "멘션 없이 응답" 방: relay 는 mention_only=false 로 전달한다.
+        # mentioned=false 라고 버리면 relay 는 전달했다고 하는데 에이전트는 영영 답하지 않는다.
+        adapter = _make_adapter()
+        adapter.handle_message = AsyncMock()
+        await adapter._handle_relay_message(self._shared_payload(mentioned=False, mention_only=False, content="현재 작업 폴더 알려줘"))
+        adapter.handle_message.assert_called_once()
+        assert adapter.handle_message.call_args.args[0].text == "현재 작업 폴더 알려줘"
+
+    @pytest.mark.asyncio
+    async def test_unmentioned_message_without_mention_only_field_is_delivered(self):
+        # 옛 relay 가 mention_only 를 싣지 않으면 relay 의 게이팅을 믿고 받는다 (버리는 쪽이 더 나쁘다).
+        adapter = _make_adapter()
+        adapter.handle_message = AsyncMock()
+        payload = self._shared_payload(mentioned=False, content="안녕")
+        del payload["mention_only"]
+        await adapter._handle_relay_message(payload)
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_replies_and_chunks_target_the_room(self):
         adapter = _make_adapter()
         adapter._sio = AsyncMock()
