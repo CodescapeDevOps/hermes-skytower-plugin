@@ -953,3 +953,68 @@ class TestConversationTitle:
         generate = MagicMock(return_value="x")
         await self._run(adapter, self._payload(content="@Hermes"), generate)
         generate.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Host resource info in heartbeat (skytower #75)
+# ---------------------------------------------------------------------------
+
+class TestHostMetrics:
+    """하트비트에 에이전트 PC 자원 현황(host) 이 실린다. 기존 퍼센트 키는 그대로."""
+
+    def test_parse_nvidia_smi_sample_line(self):
+        from skytower_plugin.adapter import _parse_nvidia_smi
+        gpus = _parse_nvidia_smi("NVIDIA GeForce RTX 4090, 12, 24564, 1024\n")
+        assert gpus == [{
+            "name": "NVIDIA GeForce RTX 4090",
+            "utilization_percent": 12.0,
+            "memory_total_bytes": 24564 * 1024 * 1024,
+            "memory_used_bytes": 1024 * 1024 * 1024,
+        }]
+
+    def test_parse_nvidia_smi_multiple_and_na(self):
+        from skytower_plugin.adapter import _parse_nvidia_smi
+        gpus = _parse_nvidia_smi("GPU A, 5, 8192, 100\n\nGPU B, [N/A], [N/A], [N/A]\n")
+        assert [g["name"] for g in gpus] == ["GPU A", "GPU B"]
+        assert gpus[1]["utilization_percent"] is None and gpus[1]["memory_total_bytes"] is None
+        assert _parse_nvidia_smi("") == []
+
+    def test_metrics_shape_and_backward_compat(self):
+        adapter = _make_adapter()
+        with patch("skytower_plugin.adapter._run_nvidia_smi", return_value=None):
+            payload = adapter._collect_metrics()
+        for key in ("cpu", "mem", "disk", "agent_type"):
+            assert key in payload
+        assert payload["agent_type"] == "hermes"
+        host = payload["host"]
+        assert set(host) >= {"hostname", "os", "arch", "python", "cpu", "memory", "disk", "gpus", "sampled_at"}
+        assert set(host["cpu"]) == {"model", "cores_physical", "cores_logical", "percent", "freq_mhz"}
+        assert set(host["memory"]) == {"total_bytes", "used_bytes", "percent"}
+        assert set(host["disk"]) == {"path", "total_bytes", "used_bytes", "percent"}
+        assert host["memory"]["total_bytes"] > 0
+        assert host["gpus"] == []
+        assert host["sampled_at"].endswith("+00:00")
+        # 정적 값은 한 번만 수집해 둔다
+        assert adapter._host_static is not None and adapter._host_static["cpu_model"] == host["cpu"]["model"]
+
+    def test_missing_nvidia_smi_is_quiet_and_not_retried(self):
+        adapter = _make_adapter()
+        with patch("skytower_plugin.adapter._run_nvidia_smi", return_value=None) as run:
+            assert adapter._collect_gpus() == []
+            assert adapter._collect_gpus() == []
+            assert run.call_count == 1, "실패 뒤 10분 동안은 다시 띄우지 않는다"
+        assert adapter._gpu_probe_failed_at > 0
+
+    def test_gpu_rows_when_nvidia_smi_present(self):
+        adapter = _make_adapter()
+        with patch("skytower_plugin.adapter._run_nvidia_smi", return_value="NVIDIA RTX A6000, 40, 49140, 2048"):
+            gpus = adapter._collect_gpus()
+        assert gpus[0]["name"] == "NVIDIA RTX A6000" and gpus[0]["utilization_percent"] == 40.0
+        assert adapter._gpu_probe_failed_at == 0.0
+
+    @pytest.mark.asyncio
+    async def test_async_collection_never_raises(self):
+        adapter = _make_adapter()
+        with patch.object(adapter, "_collect_metrics", side_effect=RuntimeError("boom")):
+            payload = await adapter._collect_metrics_async()
+        assert payload["agent_type"] == "hermes" and "host" not in payload
