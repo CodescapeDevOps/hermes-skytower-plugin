@@ -576,7 +576,9 @@ class SkyTowerAdapter(BasePlatformAdapter):
         channel_prompt = _join_prompt_layers(
             agent_persona, project_prompt, resolve_channel_prompt(extra, _lookup_id, _parent_id)
         )
-        notice = self._persona_change_notice(chat_id, agent_persona, project_prompt)
+        # 지문은 성격·역할 본문만 본다 — 참여자가 바뀌어 project_prompt 가 달라진 것은 "역할 갱신" 이 아니다.
+        _proj = data.get("project") if shared and isinstance(data.get("project"), dict) else {}
+        notice = self._persona_change_notice(chat_id, agent_persona, (_proj.get("persona") or "").strip() or None)
         if notice:
             channel_prompt = _join_prompt_layers(channel_prompt, notice)
 
@@ -646,12 +648,12 @@ class SkyTowerAdapter(BasePlatformAdapter):
             reply_to_text=reply_to_text,
         ))
 
-    def _persona_change_notice(self, chat_id: str, agent_persona: Optional[str], project_prompt: Optional[str]) -> Optional[str]:
+    def _persona_change_notice(self, chat_id: str, agent_persona: Optional[str], project_persona: Optional[str]) -> Optional[str]:
         """이 방에서 (기본 성격, 역할) 이 지난 메시지와 달라졌으면 그 턴에만 붙일 한 줄을 돌려준다.
 
         처음 보는 방은 그냥 기록만 한다 — 세션 시작에 "갱신되었다" 를 붙이면 거짓말이다.
         """
-        fingerprint = f"{agent_persona or ''}\x1f{project_prompt or ''}"
+        fingerprint = f"{agent_persona or ''}{project_persona or ''}"
         previous = self._persona_seen.get(chat_id)
         self._persona_seen[chat_id] = fingerprint
         if previous is None or previous == fingerprint:
