@@ -179,6 +179,17 @@ def _project_prompt(project: Optional[dict], participants: Optional[list]) -> Op
     return "\n".join(lines) or None
 
 
+def _join_prompt_layers(*layers: Optional[str]) -> Optional[str]:
+    """비어 있지 않은 겹을 빈 줄 하나로 잇는다. 순서가 곧 우선순위다 — 뒤가 앞을 덮는다."""
+    parts = [str(layer).strip() for layer in layers if layer and str(layer).strip()]
+    return "\n\n".join(parts) or None
+
+
+_PERSONA_CHANGED_NOTICE = (
+    "※ 이 방의 성격·역할 설명이 방금 갱신되었습니다. 이전 대화에서 따르던 설명보다 위의 설명을 따르세요."
+)
+
+
 def _reply_to_id(reply_to: Optional[str]) -> Optional[int]:
     """send(reply_to=...) 로 넘어온 사용자 메시지 id를 relay의 정수 id로 변환한다."""
     if reply_to in (None, ""):
@@ -302,6 +313,10 @@ class SkyTowerAdapter(BasePlatformAdapter):
         # 지금 처리 중인 메시지가 속한 스레드. 상태 메시지("💻 Running …")에는 reply_to 가 없어
         # relay 가 붙일 스레드를 추측해야 했고, 답을 먼저 보낸 뒤 이어지는 상태는 본문으로 샜다.
         # 같은 컨텍스트 복사 원리로 세션 task 안의 모든 send 가 이 스레드를 달고 나간다.
+        # 방(chat_id)마다 마지막으로 적용한 (기본 성격, 역할) 의 지문. relay 는 캐시 없이 메시지마다
+        # 두 값을 실어 보내므로, 여기서 지문이 같으면 프롬프트 프리픽스가 그대로라 LLM 프롬프트 캐시가
+        # 유지되고, 다르면 그 턴에만 "갱신되었다" 한 줄을 붙여 긴 세션 중간의 변경을 따르게 한다.
+        self._persona_seen: Dict[str, str] = {}
         self._current_thread_root: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar(
             "skytower_current_thread_root", default=None
         )
@@ -552,11 +567,18 @@ class SkyTowerAdapter(BasePlatformAdapter):
             if _default:
                 auto_skill = [_default]
 
-        channel_prompt = resolve_channel_prompt(extra, _lookup_id, _parent_id)
-        if shared:
-            project_prompt = _project_prompt(data.get("project"), data.get("participants"))
-            if project_prompt:
-                channel_prompt = f"{project_prompt}\n\n{channel_prompt}" if channel_prompt else project_prompt
+        # 페르소나 두 겹 (skytower docs/hermes-skytower-adapter.md "페르소나 두 겹"):
+        #   agent_persona    에이전트 기본 성격 — 모든 방에 같은 값, 개인 방에도 온다. "나는 누구인가"
+        #   project.persona  그 공유 프로젝트에서의 역할 — 공유 방에만. "이 방에서 무엇을 하는가"
+        # 그 뒤에 이 게이트웨이 설정의 channel_prompts. 뒤가 앞을 덮으므로 충돌하면 방에 가까운 쪽이 이긴다.
+        agent_persona = (data.get("agent_persona") or "").strip() or None
+        project_prompt = _project_prompt(data.get("project"), data.get("participants")) if shared else None
+        channel_prompt = _join_prompt_layers(
+            agent_persona, project_prompt, resolve_channel_prompt(extra, _lookup_id, _parent_id)
+        )
+        notice = self._persona_change_notice(chat_id, agent_persona, project_prompt)
+        if notice:
+            channel_prompt = _join_prompt_layers(channel_prompt, notice)
 
         channel_names: dict = extra.get("channel_names") or {}
         chat_topic: str | None = None
@@ -623,6 +645,19 @@ class SkyTowerAdapter(BasePlatformAdapter):
             reply_to_message_id=reply_to_message_id,
             reply_to_text=reply_to_text,
         ))
+
+    def _persona_change_notice(self, chat_id: str, agent_persona: Optional[str], project_prompt: Optional[str]) -> Optional[str]:
+        """이 방에서 (기본 성격, 역할) 이 지난 메시지와 달라졌으면 그 턴에만 붙일 한 줄을 돌려준다.
+
+        처음 보는 방은 그냥 기록만 한다 — 세션 시작에 "갱신되었다" 를 붙이면 거짓말이다.
+        """
+        fingerprint = f"{agent_persona or ''}\x1f{project_prompt or ''}"
+        previous = self._persona_seen.get(chat_id)
+        self._persona_seen[chat_id] = fingerprint
+        if previous is None or previous == fingerprint:
+            return None
+        logger.info("persona layers changed for %s — notice appended for this turn", chat_id)
+        return _PERSONA_CHANGED_NOTICE
 
     def _process_file_content(
         self,
