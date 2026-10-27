@@ -661,6 +661,72 @@ class TestSharedRooms:
         assert prompt.endswith("항상 한국어로")
 
     @pytest.mark.asyncio
+    async def test_agent_persona_comes_before_project_role(self):
+        # 기본 성격(모든 방) → 역할(이 방) → 설정의 channel_prompts 순. 뒤가 앞을 덮는다.
+        adapter = _make_adapter(channel_prompts={"40": "항상 한국어로"})
+        adapter.handle_message = AsyncMock()
+        await adapter._handle_relay_message(self._shared_payload(agent_persona="모르면 모른다고 말한다"))
+        prompt = adapter.handle_message.call_args[0][0].channel_prompt
+        assert prompt.startswith("모르면 모른다고 말한다")
+        assert prompt.index("모르면") < prompt.index('프로젝트 "Acme"') < prompt.index("너는 Acme 팀 비서다") < prompt.index("항상 한국어로")
+        assert "갱신되었습니다" not in prompt, "first message in a room is not a change"
+
+    @pytest.mark.asyncio
+    async def test_agent_persona_applies_in_personal_room(self):
+        # 개인 방에는 project 가 없지만 기본 성격은 온다 (relay 가 shared:false 와 함께 싣는다).
+        adapter = _make_adapter()
+        adapter.handle_message = AsyncMock()
+        await adapter._handle_relay_message({
+            "direction": "outbound", "type": "text", "content": "안녕",
+            "user_id": 7, "conversation_id": 3, "id": 1, "shared": False,
+            "agent_persona": "한국어로 짧게 답한다",
+        })
+        event = adapter.handle_message.call_args[0][0]
+        assert event.channel_prompt == "한국어로 짧게 답한다"
+        assert event.source.chat_type == "dm"
+
+    @pytest.mark.asyncio
+    async def test_empty_agent_persona_adds_nothing(self):
+        adapter = _make_adapter()
+        adapter.handle_message = AsyncMock()
+        await adapter._handle_relay_message({
+            "direction": "outbound", "type": "text", "content": "안녕",
+            "user_id": 7, "conversation_id": 3, "id": 1, "shared": False, "agent_persona": "  ",
+        })
+        assert adapter.handle_message.call_args[0][0].channel_prompt is None
+
+    @pytest.mark.asyncio
+    async def test_persona_change_is_announced_once(self):
+        # 같은 방에서 값이 바뀐 그 턴에만 "갱신되었다" 한 줄. 같은 값이 이어지면 프롬프트는 그대로다
+        # (프리픽스가 같아야 LLM 프롬프트 캐시가 산다).
+        adapter = _make_adapter()
+        adapter.handle_message = AsyncMock()
+        prompts = []
+        for persona in ("A", "A", "B", "B"):
+            await adapter._handle_relay_message(self._shared_payload(agent_persona=persona))
+            prompts.append(adapter.handle_message.call_args[0][0].channel_prompt)
+        assert prompts[0] == prompts[1]
+        assert "갱신되었습니다" not in prompts[1]
+        assert prompts[2].startswith("B") and prompts[2].endswith("따르세요.")
+        assert "갱신되었습니다" not in prompts[3] and prompts[3].startswith("B")
+
+    @pytest.mark.asyncio
+    async def test_participant_change_is_not_a_persona_change(self):
+        adapter = _make_adapter()
+        adapter.handle_message = AsyncMock()
+        await adapter._handle_relay_message(self._shared_payload(agent_persona="A"))
+        await adapter._handle_relay_message(self._shared_payload(agent_persona="A", participants=[{"id": 7, "name": "Alice"}]))
+        assert "갱신되었습니다" not in adapter.handle_message.call_args[0][0].channel_prompt
+
+    @pytest.mark.asyncio
+    async def test_persona_change_tracked_per_room(self):
+        adapter = _make_adapter()
+        adapter.handle_message = AsyncMock()
+        await adapter._handle_relay_message(self._shared_payload(agent_persona="A", conversation_id=40))
+        await adapter._handle_relay_message(self._shared_payload(agent_persona="B", conversation_id=41))
+        assert "갱신되었습니다" not in adapter.handle_message.call_args[0][0].channel_prompt, "a different room is not a change"
+
+    @pytest.mark.asyncio
     async def test_unmentioned_shared_message_is_dropped(self):
         adapter = _make_adapter()
         adapter.handle_message = AsyncMock()

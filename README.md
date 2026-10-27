@@ -203,10 +203,9 @@ hermes plugins doctor
 skytower/               플러그인 본체 (이 디렉토리가 ~/.hermes/plugins/skytower-platform 에 설치됨)
   plugin.yaml           매니페스트: 이름, 의존성, 환경 변수
   __init__.py           register(ctx) 진입점
-  adapter.py            SkyTowerAdapter — Socket.IO 접속, 메시지 중계, 스트리밍, 스레드, 공유 방
+  adapter.py            SkyTowerAdapter — Socket.IO 접속, 메시지 중계, 스트리밍, 스레드, 공유 방, 페르소나 두 겹
   confinement.py        공유 프로젝트 방의 도구 호출을 작업 폴더 안으로 제한하는 훅
   skytower_files.py     웹 UI 파일 브라우저용 file:* 이벤트 핸들러
-  soul_sync.py          Skytower persona → SOUL.md 동기화 (현재 어댑터에는 연결되어 있지 않음)
 scripts/                설치 스크립트 (bash, PowerShell, CMD)
 tests/                  pytest 스위트. upstream hermes-agent 체크아웃이 필요
 .github/workflows/      upstream main에 대고 매일 테스트하는 CI
