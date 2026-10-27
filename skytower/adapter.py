@@ -653,7 +653,7 @@ class SkyTowerAdapter(BasePlatformAdapter):
 
         처음 보는 방은 그냥 기록만 한다 — 세션 시작에 "갱신되었다" 를 붙이면 거짓말이다.
         """
-        fingerprint = f"{agent_persona or ''}{project_persona or ''}"
+        fingerprint = f"{agent_persona or ''}\x1f{project_persona or ''}"
         previous = self._persona_seen.get(chat_id)
         self._persona_seen[chat_id] = fingerprint
         if previous is None or previous == fingerprint:
