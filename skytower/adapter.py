@@ -38,7 +38,12 @@ import contextvars
 import json
 import logging
 import os
+import platform
 import re
+import shutil
+import subprocess
+import time
+from datetime import datetime, timezone
 from pathlib import Path as _Path
 from typing import Any, Dict, List, Optional
 
@@ -298,6 +303,10 @@ class SkyTowerAdapter(BasePlatformAdapter):
         self._sio: Optional[Any] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._intentional_disconnect: bool = False
+        # 에이전트 PC 자원 현황 (skytower #75). 변하지 않는 값은 첫 수집 때 한 번만 채운다.
+        self._host_static: Optional[dict] = None
+        # nvidia-smi 가 없거나 실패한 시각. 하트비트마다 실패 프로세스를 띄우지 않도록 10분 쉰다.
+        self._gpu_probe_failed_at: float = 0.0
 
         self._home_channels: Dict[str, str] = _load_home_channels()
         self._file_handler: Optional[FileAccessHandler] = None
@@ -365,7 +374,7 @@ class SkyTowerAdapter(BasePlatformAdapter):
                 "SkyTower connected: %s (agentId=%s)",
                 self._relay_url, self._agent_id,
             )
-            await self._sio.emit("heartbeat", self._collect_metrics())
+            await self._sio.emit("heartbeat", await self._collect_metrics_async())
             if self._heartbeat_task is None or self._heartbeat_task.done():
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
             if os.getenv("SKYTOWER_PRINT_PAIR_CODE", "").lower() in ("1", "true", "yes"):
@@ -1029,22 +1038,85 @@ class SkyTowerAdapter(BasePlatformAdapter):
             await asyncio.sleep(30)
             if self._sio and self._sio.connected:
                 try:
-                    await self._sio.emit("heartbeat", self._collect_metrics())
+                    await self._sio.emit("heartbeat", await self._collect_metrics_async())
                 except Exception:
                     pass
 
-    @staticmethod
-    def _collect_metrics() -> dict:
+    async def _collect_metrics_async(self) -> dict:
+        """지표 수집을 스레드로 보낸다 — nvidia-smi 프로세스와 /proc 읽기가 이벤트 루프를 막지 않게."""
+        try:
+            return await asyncio.to_thread(self._collect_metrics)
+        except Exception as exc:  # 수집이 실패해도 하트비트는 나가야 한다 (온라인 판정)
+            logger.debug("skytower: metrics collection failed: %s", exc)
+            return {"cpu": 0.0, "mem": 0.0, "disk": 0.0, "agent_type": "hermes"}
+
+    def _collect_metrics(self) -> dict:
+        """하트비트 페이로드. 기존 퍼센트 키(cpu/mem/disk/agent_type)는 그대로 두고 `host` 를 더한다 (skytower #75).
+
+        relay 는 이 객체를 agents.metadata 에 merge 하고 agent_heartbeat 로 흘린다. 모르는 키를 버리지
+        않으므로 relay·웹보다 먼저 배포해도 된다.
+        """
         try:
             import psutil
-            return {
-                "cpu": psutil.cpu_percent(interval=None),
-                "mem": psutil.virtual_memory().percent,
-                "disk": psutil.disk_usage("/").percent,
-                "agent_type": "hermes",
-            }
         except ImportError:
-            return {"cpu": 0.0, "mem": 0.0, "disk": 0.0, "agent_type": "hermes"}
+            return {"cpu": 0.0, "mem": 0.0, "disk": 0.0, "agent_type": "hermes", "host": None}
+
+        if self._host_static is None:
+            self._host_static = _collect_host_static(psutil)
+        static = self._host_static
+
+        cpu_percent = _safe(lambda: float(psutil.cpu_percent(interval=None)))
+        mem = _safe(psutil.virtual_memory)
+        disk_path = static.get("disk_path") or "/"
+        disk = _safe(lambda: psutil.disk_usage(disk_path))
+        freq = _safe(psutil.cpu_freq)
+
+        host = {
+            "hostname": static.get("hostname"),
+            "os": static.get("os"),
+            "arch": static.get("arch"),
+            "python": static.get("python"),
+            "cpu": {
+                "model": static.get("cpu_model"),
+                "cores_physical": static.get("cores_physical"),
+                "cores_logical": static.get("cores_logical"),
+                "percent": cpu_percent,
+                "freq_mhz": round(freq.current) if freq is not None and getattr(freq, "current", None) else None,
+            },
+            "memory": {
+                "total_bytes": int(mem.total) if mem is not None else None,
+                "used_bytes": int(mem.total - mem.available) if mem is not None else None,
+                "percent": float(mem.percent) if mem is not None else None,
+            },
+            "disk": {
+                "path": disk_path,
+                "total_bytes": int(disk.total) if disk is not None else None,
+                "used_bytes": int(disk.used) if disk is not None else None,
+                "percent": float(disk.percent) if disk is not None else None,
+            },
+            "gpus": self._collect_gpus(),
+            "sampled_at": datetime.now(timezone.utc).isoformat(),
+        }
+        return {
+            "cpu": cpu_percent if cpu_percent is not None else 0.0,
+            "mem": host["memory"]["percent"] if host["memory"]["percent"] is not None else 0.0,
+            "disk": host["disk"]["percent"] if host["disk"]["percent"] is not None else 0.0,
+            "agent_type": "hermes",
+            "host": host,
+        }
+
+    _GPU_PROBE_RETRY_SECS = 10 * 60
+
+    def _collect_gpus(self) -> list:
+        """nvidia-smi 로 GPU 이름·사용률·VRAM. 없거나 실패하면 [] 이고 10분 동안 다시 묻지 않는다."""
+        if self._gpu_probe_failed_at and time.monotonic() - self._gpu_probe_failed_at < self._GPU_PROBE_RETRY_SECS:
+            return []
+        text = _run_nvidia_smi()
+        if text is None:
+            self._gpu_probe_failed_at = time.monotonic()
+            return []
+        self._gpu_probe_failed_at = 0.0
+        return _parse_nvidia_smi(text)
 
     # ── 온보딩 ────────────────────────────────────────────────────────────────
 
@@ -1066,6 +1138,144 @@ class SkyTowerAdapter(BasePlatformAdapter):
             print("=" * 40)
         except Exception as e:
             logger.warning("Failed to fetch pairing code: %s", e)
+
+
+# ── 에이전트 PC 자원 현황 (skytower #75) ─────────────────────────────────────
+
+def _safe(fn):
+    """best-effort 수집: 실패하면 None."""
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
+def _cpu_model_name() -> Optional[str]:
+    """CPU 모델명. Linux /proc/cpuinfo → macOS sysctl → Windows 레지스트리 → platform.processor()."""
+    system = platform.system()
+    try:
+        if system == "Linux":
+            with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if line.lower().startswith("model name"):
+                        return line.split(":", 1)[1].strip() or None
+        elif system == "Darwin":
+            out = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True, timeout=2)
+            if out.returncode == 0 and out.stdout.strip():
+                return out.stdout.strip()
+        elif system == "Windows":
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+            try:
+                value, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+            finally:
+                winreg.CloseKey(key)
+            if str(value).strip():
+                return " ".join(str(value).split())
+    except Exception:
+        pass
+    return _safe(platform.processor) or None
+
+
+def _os_label() -> Optional[str]:
+    """사람이 읽는 OS 한 줄: "Linux 6.8.0 · Ubuntu 24.04", "Windows 11 (10.0.26200)", "macOS 15.1"."""
+    system = platform.system()
+    try:
+        if system == "Linux":
+            distro = None
+            try:
+                with open("/etc/os-release", encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        if line.startswith("PRETTY_NAME="):
+                            distro = line.split("=", 1)[1].strip().strip('"')
+                            break
+            except Exception:
+                distro = None
+            kernel = platform.release()
+            return f"Linux {kernel} · {distro}" if distro else f"Linux {kernel}"
+        if system == "Darwin":
+            ver = platform.mac_ver()[0]
+            return f"macOS {ver}" if ver else "macOS"
+        if system == "Windows":
+            rel, ver = platform.release(), platform.version()
+            # platform.release() 는 11 에서도 "10" 을 줄 수 있다. 빌드 22000 이상이면 11.
+            try:
+                if int(ver.split(".")[2]) >= 22000:
+                    rel = "11"
+            except Exception:
+                pass
+            return f"Windows {rel} ({ver})"
+    except Exception:
+        pass
+    return _safe(platform.platform) or None
+
+
+def _collect_host_static(psutil) -> dict:
+    """바뀌지 않는 값. 어댑터가 첫 하트비트 때 한 번만 부른다."""
+    home = str(_Path.home())
+    disk_path = home
+    try:
+        psutil.disk_usage(disk_path)
+    except Exception:
+        disk_path = "/"
+    return {
+        "hostname": _safe(platform.node) or None,
+        "os": _os_label(),
+        "arch": _safe(platform.machine) or None,
+        "python": _safe(platform.python_version),
+        "cpu_model": _cpu_model_name(),
+        "cores_physical": _safe(lambda: psutil.cpu_count(logical=False)),
+        "cores_logical": _safe(lambda: psutil.cpu_count(logical=True)),
+        "disk_path": disk_path,
+    }
+
+
+_NVIDIA_SMI_ARGS = ["--query-gpu=name,utilization.gpu,memory.total,memory.used", "--format=csv,noheader,nounits"]
+
+
+def _run_nvidia_smi() -> Optional[str]:
+    """nvidia-smi 출력 텍스트. 실행 파일이 없거나 실패·타임아웃이면 None (절대 예외를 내지 않는다)."""
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return None
+    try:
+        out = subprocess.run([exe, *_NVIDIA_SMI_ARGS], capture_output=True, text=True, timeout=2)
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    return out.stdout
+
+
+def _parse_nvidia_smi(text: str) -> list:
+    """`name, utilization.gpu, memory.total, memory.used` (단위 없음, MiB) CSV 줄들을 gpus 목록으로.
+
+    값이 "[N/A]" 이거나 숫자가 아니면 그 필드만 None. 이름만 있어도 한 줄로 친다.
+    """
+    gpus = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        name = parts[0] if parts and parts[0] else None
+        if not name:
+            continue
+
+        def _num(i: int) -> Optional[float]:
+            try:
+                return float(parts[i])
+            except (IndexError, ValueError):
+                return None
+
+        util, total_mib, used_mib = _num(1), _num(2), _num(3)
+        gpus.append({
+            "name": name,
+            "utilization_percent": util,
+            "memory_total_bytes": int(total_mib * 1024 * 1024) if total_mib is not None else None,
+            "memory_used_bytes": int(used_mib * 1024 * 1024) if used_mib is not None else None,
+        })
+    return gpus
 
 
 # System-prompt hint injected for platform="skytower" (consumed by agent.system_prompt.platform_hint

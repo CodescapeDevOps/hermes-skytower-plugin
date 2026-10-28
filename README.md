@@ -143,6 +143,14 @@ curl -fsSL .../install-skytower.sh | bash -s -- --ref v1.1.0
 
 `config.yaml`의 `platforms.skytower` 아래에 토큰과 URL, 대화방별 스킬 바인딩(`channel_skill_bindings`, `default_skill`), 대화방 프롬프트(`channel_prompts`), 표시명(`channel_names`)을 둘 수도 있습니다. 예시는 [skytower/adapter.py](skytower/adapter.py) 머리말에 있습니다.
 
+## 하트비트와 PC 자원 현황
+
+접속 직후와 30초마다 Relay 에 `heartbeat` 를 보냅니다. 기존 `cpu` · `mem` · `disk` (퍼센트) 에 더해 `host` 객체로
+에이전트 PC 의 자원 현황을 싣습니다 — 호스트 이름, OS, 아키텍처, CPU 모델·코어 수·사용량, 메모리 사용/총량, 홈 폴더가
+있는 디스크 사용/총량, GPU 이름·사용률·VRAM (`nvidia-smi` 가 있을 때만; 없으면 빈 목록이고 10분 동안 다시 묻지 않습니다).
+Relay 는 이 값을 에이전트 metadata 에 merge 하고 Skytower 웹의 에이전트 설정 화면 "로컬 환경" 카드가 보여 줍니다
+(skytower #75). 수집은 전부 best-effort 라 못 구한 값은 `null` 입니다.
+
 ## 게이트웨이 시작
 
 ```bash
