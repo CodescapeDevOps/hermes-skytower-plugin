@@ -36,3 +36,7 @@ optional_env:
     description: "Print pairing code on connect (1=yes, 0=no)"
     prompt: "Print pairing code on connect? (1/0)"
     password: false
+  - name: SKYTOWER_TERMINAL
+    description: "Web terminal (term:* events). Set 0 to refuse terminal sessions on this PC"
+    prompt: "Allow web terminal sessions? (1/0)"
+    password: false
