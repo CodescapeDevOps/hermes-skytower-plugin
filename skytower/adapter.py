@@ -57,6 +57,7 @@ from gateway.platforms.base import (
     cache_image_from_bytes,
 )
 from .skytower_files import FileAccessHandler
+from .skytower_terminal import TerminalHandler
 
 # 프로젝트 작업 폴더 confinement 는 부가 기능이다. 파일이 빠진 채 배포됐거나 이 hermes 버전과
 # 안 맞아 import 가 실패해도 접속(어댑터 등록)까지 막지는 않는다 — 경고만 남기고 제한 없이 돈다.
@@ -310,6 +311,8 @@ class SkyTowerAdapter(BasePlatformAdapter):
 
         self._home_channels: Dict[str, str] = _load_home_channels()
         self._file_handler: Optional[FileAccessHandler] = None
+        # 웹 터미널 (skytower_terminal). 소켓은 connect() 에서 붙이고, 능력 조사 결과는 재접속해도 유지한다.
+        self._terminal_handler = TerminalHandler(None)
         self._relay_capabilities: Dict[str, bool] = {}
         self._title_tasks: set = set()
         # gateway 는 send_chunk 에 chat_id 를 주지 않는다. 세션 task 는 메시지를
@@ -459,6 +462,29 @@ class SkyTowerAdapter(BasePlatformAdapter):
             except Exception:
                 logger.exception("file:delete handler error — data=%s", data)
 
+        # ── 웹 터미널 (term:*) ───────────────────────────────────────────────
+
+        self._terminal_handler.bind(self._sio)
+
+        @self._sio.on("term:open")
+        async def on_term_open(data: dict):
+            try:
+                await self._terminal_handler.handle_open(data)
+            except Exception:
+                logger.exception("term:open handler error — data=%s", data)
+
+        @self._sio.on("term:input")
+        async def on_term_input(data: dict):
+            await self._terminal_handler.handle_input(data)
+
+        @self._sio.on("term:resize")
+        async def on_term_resize(data: dict):
+            await self._terminal_handler.handle_resize(data)
+
+        @self._sio.on("term:close")
+        async def on_term_close(data: dict):
+            await self._terminal_handler.handle_close(data)
+
         # ── 스킬 조회 이벤트 ──────────────────────────────────────────────────
 
         @self._sio.on("request:agent-skills")
@@ -484,6 +510,10 @@ class SkyTowerAdapter(BasePlatformAdapter):
         self._running = False
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
+        try:
+            await self._terminal_handler.close_all()
+        except Exception as exc:
+            logger.warning("terminal sessions not closed cleanly: %s", exc)
         if self._sio:
             await self._sio.disconnect()
         self._mark_disconnected()
@@ -1056,10 +1086,12 @@ class SkyTowerAdapter(BasePlatformAdapter):
         relay 는 이 객체를 agents.metadata 에 merge 하고 agent_heartbeat 로 흘린다. 모르는 키를 버리지
         않으므로 relay·웹보다 먼저 배포해도 된다.
         """
+        # 이 PC 가 지원하는 터미널 기능 (pty·guard 셸·격리 수단). 첫 조사만 느리고 그 뒤는 캐시.
+        capabilities = {"terminal": self._terminal_handler.capabilities()}
         try:
             import psutil
         except ImportError:
-            return {"cpu": 0.0, "mem": 0.0, "disk": 0.0, "agent_type": "hermes", "host": None}
+            return {"cpu": 0.0, "mem": 0.0, "disk": 0.0, "agent_type": "hermes", "host": None, "capabilities": capabilities}
 
         if self._host_static is None:
             self._host_static = _collect_host_static(psutil)
@@ -1103,6 +1135,7 @@ class SkyTowerAdapter(BasePlatformAdapter):
             "disk": host["disk"]["percent"] if host["disk"]["percent"] is not None else 0.0,
             "agent_type": "hermes",
             "host": host,
+            "capabilities": capabilities,
         }
 
     _GPU_PROBE_RETRY_SECS = 10 * 60
