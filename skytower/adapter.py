@@ -138,6 +138,36 @@ def _with_thread_context(text: str, root: dict) -> str:
     )
 
 
+def _with_peer_context(text: str, peers: list) -> str:
+    """한 방에 에이전트 여럿 (skytower ADR 0006): 이 에이전트가 보지 못한 그동안의 대화를 본문 앞에 붙인다.
+
+    relay 는 다른 에이전트의 답을 메시지로 보내지 않는다. 대신 이 에이전트가 마지막으로 본 메시지 이후에
+    같은 스레드에서 오간 것(다른 에이전트의 답, 다른 에이전트에게 간 사람 메시지)을 ``peer_context`` 로 싣는다.
+    세션에는 없는 내용이라 본문에 넣되, "참고만 하고 답하지 말 것" 을 분명히 한다.
+    """
+    lines = []
+    for p in peers:
+        if not isinstance(p, dict):
+            continue
+        body = (p.get("content") or "").strip()
+        if not body:
+            continue
+        if p.get("direction") == "inbound":
+            who = f"{p.get('agent_name') or '다른 에이전트'}(에이전트)"
+        else:
+            who = p.get("user_name") or "사용자"
+        note = " (앞부분만)" if p.get("truncated") else ""
+        lines.append(f"[{who}]{note} {body}")
+    if not lines:
+        return text
+    return (
+        "[그동안 오간 대화] 아래는 당신이 받지 않은 사이에 같은 자리에서 오간 메시지입니다. "
+        "참고만 하고 여기에 답하지 마세요. 답할 것은 맨 아래 \"지금 온 메시지\" 입니다.\n"
+        + "\n".join(lines)
+        + f"\n--- 지금 온 메시지 ---\n{text}"
+    )
+
+
 def _shared_chat_id(agent_id: str, conv_id: str) -> str:
     """공유 프로젝트 방의 chat_id. 사용자 id 를 넣지 않아 방 하나가 세션 하나가 된다.
 
@@ -664,6 +694,11 @@ class SkyTowerAdapter(BasePlatformAdapter):
                 )
             except Exception as exc:
                 logger.warning("skytower: confinement.remember failed (message still delivered): %s", exc)
+
+        # 한 방에 여럿: 이 에이전트가 보지 못한 대화를 먼저 붙인다 (루트 전문이 그 바깥을 감싼다).
+        peer_context = data.get("peer_context")
+        if isinstance(peer_context, list) and peer_context and not _is_control_reply(content):
+            content = _with_peer_context(content, peer_context)
 
         thread_root = data.get("thread_root")
         if (isinstance(thread_root, dict) and (thread_root.get("content") or "").strip()
