@@ -1018,3 +1018,50 @@ class TestHostMetrics:
         with patch.object(adapter, "_collect_metrics", side_effect=RuntimeError("boom")):
             payload = await adapter._collect_metrics_async()
         assert payload["agent_type"] == "hermes" and "host" not in payload
+
+
+class TestPeerContext:
+    """한 방에 에이전트 여럿 (skytower ADR 0006): relay 의 peer_context 를 본문 앞에 참고용으로 붙인다."""
+
+    def test_formatter_lists_agents_and_people(self):
+        from skytower_plugin.adapter import _with_peer_context
+        out = _with_peer_context("지금까지 요약해줘", [
+            {"direction": "inbound", "agent_name": "Bamsil", "content": "목차를 넣었습니다"},
+            {"direction": "outbound", "user_name": "Bob", "content": "@밤실 마무리해", "truncated": True},
+            {"direction": "inbound", "agent_name": None, "content": "   "},
+        ])
+        assert out.startswith("[그동안 오간 대화]")
+        assert "[Bamsil(에이전트)] 목차를 넣었습니다" in out
+        assert "[Bob] (앞부분만) @밤실 마무리해" in out
+        assert out.endswith("--- 지금 온 메시지 ---\n지금까지 요약해줘")
+        assert "참고만 하고" in out
+
+    def test_formatter_without_usable_items_returns_text(self):
+        from skytower_plugin.adapter import _with_peer_context
+        assert _with_peer_context("hi", [{"direction": "inbound", "content": ""}, "junk"]) == "hi"
+
+    @pytest.mark.asyncio
+    async def test_relay_message_prepends_peer_context_inside_thread_root(self):
+        adapter = _make_adapter()
+        adapter.handle_message = AsyncMock()
+        await adapter._handle_relay_message({
+            "direction": "outbound", "type": "text", "content": "요약해줘", "user_id": 7,
+            "conversation_id": 3, "id": 9, "thread_root_id": 5,
+            "thread_root": {"id": 5, "content": "문서 정리", "direction": "outbound", "user_name": "홍길동"},
+            "peer_context": [{"direction": "inbound", "agent_name": "Bamsil", "content": "목차를 넣었습니다"}],
+        })
+        text = adapter.handle_message.call_args[0][0].text
+        assert text.startswith("[스레드 답글]"), "root context wraps the outside"
+        assert "[그동안 오간 대화]" in text and "[Bamsil(에이전트)] 목차를 넣었습니다" in text
+        assert text.endswith("--- 지금 온 메시지 ---\n요약해줘")
+
+    @pytest.mark.asyncio
+    async def test_control_replies_skip_peer_context(self):
+        adapter = _make_adapter()
+        adapter.handle_message = AsyncMock()
+        await adapter._handle_relay_message({
+            "direction": "outbound", "type": "text", "content": "/approve", "user_id": 7,
+            "conversation_id": 3, "id": 9,
+            "peer_context": [{"direction": "inbound", "agent_name": "Bamsil", "content": "x"}],
+        })
+        assert adapter.handle_message.call_args[0][0].text == "/approve"
