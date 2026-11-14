@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 *.egg-info/
 .DS_Store
+
+# 로컬 GitHub 토큰 (gh CLI 용) — 절대 커밋 금지
+.git_token
