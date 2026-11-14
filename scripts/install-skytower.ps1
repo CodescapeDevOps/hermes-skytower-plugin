@@ -197,10 +197,10 @@ function Install-Plugin {
     param([string]$HermesCli, [string]$HermesHomeDir, [string]$ScriptDir)
 
     $targetDir = "$HermesHomeDir\plugins\$PluginName"
-    $localPluginDir = Join-Path $ScriptDir "..\skytower"
-
     # 로컬 개발 모드: 이 스크립트가 플러그인 저장소 안에 있으면 그 작업 트리를 그대로 복사한다.
-    if (Test-Path "$localPluginDir\plugin.yaml") {
+    # iex (irm ...) 원격 실행이면 $ScriptDir 가 비어 있으므로 이 분기를 건너뛰고 원격 설치로 간다 (#10).
+    $localPluginDir = if ($ScriptDir) { Join-Path $ScriptDir "..\skytower" } else { $null }
+    if ($localPluginDir -and (Test-Path "$localPluginDir\plugin.yaml")) {
         Write-Info "로컬 소스에서 플러그인 복사 중 -> $targetDir"
         New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
         Copy-Item "$localPluginDir\*" -Destination $targetDir -Recurse -Force
@@ -507,8 +507,11 @@ $HermesHomeResolved = Resolve-HermesHome -InstallDir $InstallDir
 $PythonExe          = Find-Python   -InstallDir $InstallDir
 $UvExe              = Find-Uv       -InstallDir $InstallDir
 $HermesCli          = Find-HermesCli -InstallDir $InstallDir -HermesHomeDir $HermesHomeResolved
-$ScriptDir          = Split-Path -Parent $MyInvocation.MyCommand.Path
-if (-not $ScriptDir) { $ScriptDir = $PWD.Path }
+# iex (irm ...) 로 실행하면 스크립트 파일 경로가 없어 $MyInvocation.MyCommand.Path 가 null 이고,
+# Split-Path 에 null 을 넘기면 종료 오류로 설치가 중단된다 (#10). 경로가 있을 때만 계산하고,
+# 없으면 비워 둔다 ($PWD 로 대체하면 엉뚱한 폴더의 skytower\ 를 로컬 소스로 오인할 수 있음).
+$ScriptPath         = $MyInvocation.MyCommand.Path
+$ScriptDir          = if ($ScriptPath) { Split-Path -Parent $ScriptPath } else { "" }
 
 Install-Plugin      -HermesCli $HermesCli -HermesHomeDir $HermesHomeResolved -ScriptDir $ScriptDir
 Install-Deps        -InstallDir $InstallDir -HermesHomeDir $HermesHomeResolved -PythonExe $PythonExe -UvExe $UvExe
