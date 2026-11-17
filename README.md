@@ -151,6 +151,25 @@ curl -fsSL .../install-skytower.sh | bash -s -- --ref v1.1.0
 Relay 는 이 값을 에이전트 metadata 에 merge 하고 Skytower 웹의 에이전트 설정 화면 "로컬 환경" 카드가 보여 줍니다
 (skytower #75). 수집은 전부 best-effort 라 못 구한 값은 `null` 입니다.
 
+## 답에 싣는 사용량과 맥락 크기
+
+Relay 가 `relay:capabilities` 로 `usage_detail: true` 를 알리면, 답(`message_done`)과 스트리밍 답의 마지막 편집
+(`message_edit`, `finalize: true`)에 그 방 세션이 지난번 메시지 뒤로 쓴 토큰과 지금 맥락 크기를 싣습니다.
+
+```jsonc
+"usage":   { "input_tokens": 104, "cache_read_tokens": 1262750, "cache_write_tokens": 217837,
+             "output_tokens": 16943, "api_calls": 35, "model": "claude-opus-5-5", "cache_ttl": "5m" },
+"context": { "tokens": 152300, "window": 1000000 }
+```
+
+- hermes 의 `post_api_request` 훅으로 API 호출마다 세션 몫에 쌓고, 메시지를 보낼 때 꺼내 비웁니다. 한 턴이 여러
+  메시지로 나가도 메시지마다 "그때까지의 몫" 만 실려서 합이 맞습니다. 보내기에 실패하면 다음 메시지에 실립니다.
+- `context.tokens` 는 마지막 호출이 보낸 양(새 입력 + 캐시 읽기 + 캐시 쓰기)입니다. `cache_ttl` 은 `prompt_caching.cache_ttl`
+  (`auto` 면 hermes 가 이 플랫폼에 고르는 값), 모르면 `null` 입니다.
+- 토큰은 종류별로 그대로 보냅니다. 비용에 맞춘 환산과 월 한도는 Relay 가 합니다 (skytower ADR 0016).
+- 백그라운드 검토(background_review)는 같은 세션 id 로 돌아서 그 호출도 쌓이고 다음 메시지에 실립니다.
+- 크론 작업은 Skytower 메시지가 아니라 여기 잡히지 않습니다.
+
 ## 게이트웨이 시작
 
 ```bash
@@ -213,6 +232,7 @@ skytower/               플러그인 본체 (이 디렉토리가 ~/.hermes/plugi
   __init__.py           register(ctx) 진입점
   adapter.py            SkyTowerAdapter — Socket.IO 접속, 메시지 중계, 스트리밍, 스레드, 공유 방, 페르소나 두 겹
   confinement.py        공유 프로젝트 방의 도구 호출을 작업 폴더 안으로 제한하는 훅
+  usage_report.py       API 호출마다 토큰을 세션 몫에 쌓아 답에 싣는 훅 (usage · context)
   skytower_files.py     웹 UI 파일 브라우저용 file:* 이벤트 핸들러
 scripts/                설치 스크립트 (bash, PowerShell, CMD)
 tests/                  pytest 스위트. upstream hermes-agent 체크아웃이 필요

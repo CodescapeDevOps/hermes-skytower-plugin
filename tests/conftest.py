@@ -29,7 +29,7 @@ PLUGIN_DIR = REPO_ROOT / "skytower"
 PLUGIN_NAME = "skytower-platform"
 TEST_PACKAGE = "skytower_plugin"
 _PLUGIN_FILES = ("__init__.py", "adapter.py", "confinement.py", "skytower_files.py", "skytower_terminal.py",
-                 "term_guard.py", "plugin.yaml")
+                 "term_guard.py", "usage_report.py", "plugin.yaml")
 
 
 def _find_hermes_src() -> Path:

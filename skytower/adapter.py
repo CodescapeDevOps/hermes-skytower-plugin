@@ -67,6 +67,13 @@ except Exception as _confinement_exc:  # pragma: no cover - 배포 환경 차이
     confinement = None
     logging.getLogger(__name__).warning("skytower: confinement unavailable, running without folder limits: %s", _confinement_exc)
 
+# 턴 사용량·맥락 크기 보고(usage_report.py)도 부가 기능이다. 없으면 사용량 없이 메시지만 간다.
+try:
+    from . import usage_report
+except Exception as _usage_exc:  # pragma: no cover - 배포 환경 차이
+    usage_report = None
+    logging.getLogger(__name__).warning("skytower: usage report unavailable, replies go without usage: %s", _usage_exc)
+
 logger = logging.getLogger(__name__)
 
 # 본문 앞쪽의 @멘션들. 제목을 만들 때 떼어 낸다 (relay 의 즉시 제목과 같은 규칙).
@@ -352,6 +359,12 @@ class SkyTowerAdapter(BasePlatformAdapter):
         self._current_chat_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
             "skytower_current_chat_id", default=None
         )
+        # 사용량 보고(usage_report.py): 지금 처리 중인 메시지의 세션 키. 같은 원리로 세션 task 안의
+        # send/edit 가 자기 세션에 쌓인 몫을 꺼낸다. 컨텍스트 밖에서 불리면 방 → 세션 키 표를 본다.
+        self._current_session_key: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+            "skytower_current_session_key", default=None
+        )
+        self._session_key_by_chat: Dict[str, str] = {}
         # 지금 처리 중인 메시지가 속한 스레드. 상태 메시지("💻 Running …")에는 reply_to 가 없어
         # relay 가 붙일 스레드를 추측해야 했고, 답을 먼저 보낸 뒤 이어지는 상태는 본문으로 샜다.
         # 같은 컨텍스트 복사 원리로 세션 task 안의 모든 send 가 이 스레드를 달고 나간다.
@@ -684,6 +697,16 @@ class SkyTowerAdapter(BasePlatformAdapter):
         )
         reply_to_message_id, reply_to_text = _extract_reply_to(data)
 
+        # 이 메시지가 돌 세션: 답을 보낼 때 그 세션에 쌓인 사용량을 꺼낸다 (usage_report.py).
+        try:
+            session_key = self._source_session_key(source)
+        except Exception as exc:  # pragma: no cover - 방어
+            session_key = None
+            logger.debug("skytower: session key unavailable for usage report: %s", exc)
+        if session_key:
+            self._current_session_key.set(session_key)
+            self._session_key_by_chat[chat_id] = session_key
+
         # 공유 프로젝트 방의 작업 폴더: 이 세션의 도구 호출을 그 폴더 안으로 제한한다
         # (confinement.py). 개인 방이나 폴더가 없는 프로젝트는 제한을 푼다.
         if confinement is not None:
@@ -975,6 +998,10 @@ class SkyTowerAdapter(BasePlatformAdapter):
         if thread_root is not None and "target_conversation_id" in payload:
             payload["target_thread_root_id"] = thread_root
 
+        # 이 세션에서 지난번 메시지 뒤로 쓴 토큰과 지금 맥락 크기 (relay 가 usage_detail 을 알릴 때만)
+        usage_key, usage_fields = self._take_usage(chat_id)
+        payload.update(usage_fields)
+
         logger.info(
             "[REASONING_DEBUG] adapter.send -> message_done content_head=%r",
             content[:120],
@@ -994,6 +1021,7 @@ class SkyTowerAdapter(BasePlatformAdapter):
             await self._sio.emit("message_done", payload)
             return SendResult(success=True)
         except Exception as e:
+            self._put_back_usage(usage_key, usage_fields)
             return SendResult(success=False, error=str(e))
 
     async def edit_message(
@@ -1016,6 +1044,9 @@ class SkyTowerAdapter(BasePlatformAdapter):
             "finalize": finalize,
         }
         payload.update(self._chat_id_targets(chat_id))
+        # 스트리밍 답의 마지막 편집에만 싣는다. 중간 편집은 내용만 바뀐다 (relay 는 finalize 일 때 더한다).
+        usage_key, usage_fields = self._take_usage(chat_id) if finalize else (None, {})
+        payload.update(usage_fields)
 
         logger.info(
             "[REASONING_DEBUG] adapter.edit_message -> message_edit content_head=%r finalize=%s",
@@ -1025,9 +1056,36 @@ class SkyTowerAdapter(BasePlatformAdapter):
         try:
             ack = await self._sio.call("message_edit", payload, timeout=8)
             success = ack.get("success", True) if isinstance(ack, dict) else True
+            if not success:
+                self._put_back_usage(usage_key, usage_fields)
             return SendResult(success=bool(success), message_id=message_id)
         except Exception as e:
+            self._put_back_usage(usage_key, usage_fields)
             return SendResult(success=False, error=str(e))
+
+    # ── 사용량 보고 (usage_report.py) ─────────────────────────────────────────
+
+    def _take_usage(self, chat_id: Optional[str]) -> tuple:
+        """``(세션 키, payload 에 합칠 {"usage", "context"})``. 실을 것이 없으면 ``(None, {})``.
+
+        세션 키는 이 메시지를 처리 중인 세션 task 의 것을 먼저 쓴다. 다른 방으로 보내는 send 이거나
+        컨텍스트 밖이면 그 방에 마지막으로 온 메시지의 세션 키를 쓴다.
+        """
+        if usage_report is None or not self._relay_capabilities.get("usage_detail"):
+            return None, {}
+        key = None
+        if chat_id and self._current_chat_id.get() == chat_id:
+            key = self._current_session_key.get()
+        if not key:
+            key = self._session_key_by_chat.get(chat_id or "")
+        fields = usage_report.take(key) if key else None
+        return (key, fields) if fields else (None, {})
+
+    @staticmethod
+    def _put_back_usage(key: Optional[str], fields: Dict[str, Any]) -> None:
+        """보내지 못한 몫은 다음 메시지에 실리도록 되돌린다."""
+        if usage_report is not None and key and fields:
+            usage_report.put_back(key, fields)
 
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         if not self._relay_capabilities.get("typing"):
@@ -1433,3 +1491,9 @@ def register(ctx) -> None:
             confinement.register_hooks(ctx)
         except Exception as exc:
             logging.getLogger(__name__).warning("skytower: confinement hooks not registered: %s", exc)
+    # 턴 사용량·맥락 크기: API 호출마다 세션 몫에 쌓고, 답을 보낼 때 싣는다 (usage_report.py).
+    if usage_report is not None:
+        try:
+            usage_report.register_hooks(ctx)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("skytower: usage hooks not registered: %s", exc)
