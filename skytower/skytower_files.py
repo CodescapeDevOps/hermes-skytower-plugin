@@ -43,6 +43,12 @@ from typing import Any, Dict, Optional
 
 from agent.file_safety import build_write_denied_prefixes, get_read_block_error, is_write_denied
 
+# 작업 폴더 표기 변환(WSL ↔ Windows 드라이브)만 빌려 쓴다. 없으면 받은 표기 그대로.
+try:
+    from . import confinement
+except Exception:  # pragma: no cover - 배포 환경 차이
+    confinement = None
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -147,6 +153,31 @@ def _session_cwd(conv_id: Optional[str] = None) -> Path:
                 pass
 
     return Path.home().resolve()
+
+
+def _local(p: str) -> str:
+    """relay 가 적은 경로를 이 호스트의 표기로 (``D:/x`` ↔ ``/mnt/d/x``)."""
+    return confinement.to_local_path(p) if confinement else p
+
+
+def _list_root(root: Any, conv_id: Optional[str] = None) -> Path:
+    """file:list 의 기준 폴더 — 목록이 그 위로 올라가지 않는 폴더.
+
+    relay 는 작업 폴더가 정해진 방(공유 프로젝트 방)이면 그 폴더를 ``root`` 로 보낸다 (skytower #137).
+    전에는 늘 세션 기본 폴더(TERMINAL_CWD → HERMES_HOME → 홈)를 썼는데, Windows 에서 홈은 ``C:\\Users\\x`` 이고
+    작업 폴더는 대개 ``D:\\work\\x`` 라 relay 가 보낸 작업 폴더가 "기준 폴더 밖" 으로 홈에 되돌려졌다.
+    ``root`` 가 없으면(개인 방·1:1 방) 예전처럼 세션 기본 폴더다.
+
+    ``root`` 가 있는데 이 PC 에 없거나 폴더가 아니면 ValueError — 홈으로 되돌리면 공유 방 멤버에게
+    작업 폴더 밖(홈)의 목록을 보이게 된다.
+    """
+    raw = root.strip() if isinstance(root, str) else ""
+    if not raw:
+        return _session_cwd(conv_id)
+    p = _resolve(_local(raw))
+    if not p.is_dir():
+        raise ValueError(f"Project folder not found on this PC: {raw}")
+    return p
 
 
 def _is_read_blocked(resolved: Path) -> Optional[str]:
@@ -260,20 +291,32 @@ class FileAccessHandler:
 
     async def handle_list(self, data: dict) -> None:
         """
-        data: { request_id: str, path: str }
-        emit: file:list_result { request_id, path, entries } | { request_id, error }
+        data: { request_id: str, path: str, root?: str }
+          root — relay 가 정한 이 방의 기준 폴더(공유 방의 작업 폴더). 없으면 세션 기본 폴더.
+        emit: file:list_result { request_id, path, root, entries } | { request_id, error }
         """
         request_id = data.get("request_id", "")
         raw_path   = data.get("path", "~")
         conv_id    = data.get("conv_id")
-        logger.info("file:list received — request_id=%s raw_path=%r conv_id=%s",
-                    request_id, raw_path, conv_id)
+        root       = data.get("root")
+        logger.info("file:list received — request_id=%s raw_path=%r root=%r conv_id=%s",
+                    request_id, raw_path, root, conv_id)
 
         async def _err(msg: str) -> None:
             await self._emit("file:list_result", {"request_id": request_id, "error": msg})
 
         try:
-            resolved = _resolve(raw_path)
+            session_root = _list_root(root, conv_id)
+        except ValueError as e:
+            await _err(str(e))
+            return
+        except Exception as e:
+            await _err(f"Invalid root: {e}")
+            return
+
+        try:
+            # 기준 폴더를 relay 가 정한 방이면 경로도 relay 표기로 왔다 — 이 호스트 표기로 바꿔 푼다.
+            resolved = _resolve(_local(raw_path) if root else raw_path)
         except Exception as e:
             await _err(f"Invalid path: {e}")
             return
@@ -281,8 +324,6 @@ class FileAccessHandler:
         if blocked := _is_read_blocked(resolved):
             await _err(blocked)
             return
-
-        session_root = _session_cwd(conv_id)
 
         if not resolved.exists():
             # 요청 경로가 없으면 세션 작업 디렉토리로 폴백 (예: /workspace → conv_home)
