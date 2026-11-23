@@ -182,3 +182,92 @@ class TestHandleDelete:
         await handler.handle_delete({"request_id": "d3", "path": ""})
 
         assert emitted[0] == ("file:delete_result", {"request_id": "d3", "error": "path is required"})
+
+
+# ---------------------------------------------------------------------------
+# file:list — 기준 폴더 (skytower #137)
+# ---------------------------------------------------------------------------
+
+class TestHandleList:
+    """공유 방은 relay 가 작업 폴더를 ``root`` 로 보낸다. Windows 에서 홈(``C:/Users/x``) 밖에 있는
+    작업 폴더(``D:/work/x``)가 홈으로 되돌려지던 문제를 홈과 작업 폴더를 서로 다른 tmp 폴더로 두고 재현한다."""
+
+    @staticmethod
+    def _dirs(tmp_path):
+        home = tmp_path / "home"
+        project = tmp_path / "work" / "project0"
+        (home / "Documents").mkdir(parents=True)
+        (project / "docs").mkdir(parents=True)
+        (project / "README.md").write_text("hi")
+        return home.resolve(), project.resolve()
+
+    async def _list(self, data, home):
+        emitted = []
+        handler = _make_handler(emitted)
+        with patch("skytower_plugin.skytower_files._session_cwd", return_value=home):
+            await handler.handle_list({"request_id": "l1", **data})
+        assert len(emitted) == 1 and emitted[0][0] == "file:list_result"
+        return emitted[0][1]
+
+    @staticmethod
+    def _names(result):
+        return sorted(e["name"] for e in result["entries"])
+
+    @pytest.mark.asyncio
+    async def test_without_root_project_outside_home_is_clamped_to_home(self, tmp_path):
+        """예전 동작(그리고 root 를 모르는 옛 relay): 세션 기본 폴더 밖은 그 폴더로 되돌린다."""
+        home, project = self._dirs(tmp_path)
+        result = await self._list({"path": str(project)}, home)
+        assert result["path"] == str(home)
+        assert self._names(result) == ["Documents"]
+
+    @pytest.mark.asyncio
+    async def test_root_opens_project_folder_outside_home(self, tmp_path):
+        home, project = self._dirs(tmp_path)
+        result = await self._list({"path": str(project), "root": str(project)}, home)
+        assert result["path"] == str(project)
+        assert result["root"] == str(project)
+        assert self._names(result) == ["README.md", "docs"], "no '..' at the root"
+
+    @pytest.mark.asyncio
+    async def test_root_accepts_forward_slashes(self, tmp_path):
+        """relay 는 설정에 적힌 표기 그대로(`D:/work/x`) 보낸다."""
+        home, project = self._dirs(tmp_path)
+        fwd = str(project).replace("\\", "/")
+        result = await self._list({"path": fwd, "root": fwd}, home)
+        assert result["path"] == str(project)
+
+    @pytest.mark.asyncio
+    async def test_subfolder_has_parent_entry_up_to_root(self, tmp_path):
+        home, project = self._dirs(tmp_path)
+        result = await self._list({"path": str(project / "docs"), "root": str(project)}, home)
+        assert result["path"] == str(project / "docs")
+        assert result["entries"][0] == {"name": "..", "path": str(project), "type": "dir"}
+
+    @pytest.mark.asyncio
+    async def test_path_outside_root_is_clamped_to_root_not_home(self, tmp_path):
+        home, project = self._dirs(tmp_path)
+        result = await self._list({"path": str(home), "root": str(project)}, home)
+        assert result["path"] == str(project)
+        assert "Documents" not in self._names(result)
+
+    @pytest.mark.asyncio
+    async def test_missing_path_falls_back_to_root(self, tmp_path):
+        home, project = self._dirs(tmp_path)
+        result = await self._list({"path": str(project / "ghost"), "root": str(project)}, home)
+        assert result["path"] == str(project)
+
+    @pytest.mark.asyncio
+    async def test_missing_root_is_an_error_not_home(self, tmp_path):
+        """작업 폴더가 이 PC 에 없으면 홈 목록을 보여 주지 않는다 — 공유 방 멤버에게 작업 폴더 밖이 보인다."""
+        home, _ = self._dirs(tmp_path)
+        ghost = tmp_path / "work" / "nope"
+        result = await self._list({"path": str(ghost), "root": str(ghost)}, home)
+        assert "entries" not in result
+        assert str(ghost) in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_blank_root_means_session_default(self, tmp_path):
+        home, _ = self._dirs(tmp_path)
+        result = await self._list({"path": "~/", "root": "  "}, home)
+        assert result["path"] == str(home)
